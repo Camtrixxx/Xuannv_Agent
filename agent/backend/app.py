@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from agent.config import load_config
 from agent.graph.report_agent import ReportAgent
 from agent.schemas.report import ReportRequest, to_dict
+from agent.services.patch_selection_service import PatchSelectionService
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -225,11 +226,16 @@ def _api_docs_page() -> str:
 """
 
 
+def _no_store_html(content: str) -> HTMLResponse:
+    return HTMLResponse(content, headers={"Cache-Control": "no-store, max-age=0"})
+
+
 def create_app(agent: ReportAgent | None = None):
     if FastAPI is None:
         raise RuntimeError("FastAPI is not installed. Use --legacy-http or install fastapi uvicorn.")
 
     report_agent = agent or ReportAgent()
+    patch_selector = PatchSelectionService()
     app = FastAPI(title="Yajiang Report Agent", version="0.2.0")
     config = load_config()
     if CORSMiddleware is not None:
@@ -246,11 +252,11 @@ def create_app(agent: ReportAgent | None = None):
 
     @app.get("/", response_class=HTMLResponse)
     def ui() -> HTMLResponse:
-        return HTMLResponse(UI_PATH.read_text(encoding="utf-8"))
+        return _no_store_html(UI_PATH.read_text(encoding="utf-8"))
 
     @app.get("/ui", response_class=HTMLResponse)
     def ui_alias() -> HTMLResponse:
-        return HTMLResponse(UI_PATH.read_text(encoding="utf-8"))
+        return _no_store_html(UI_PATH.read_text(encoding="utf-8"))
 
     @app.get("/workflow", response_class=HTMLResponse)
     def workflow() -> HTMLResponse:
@@ -296,6 +302,14 @@ def create_app(agent: ReportAgent | None = None):
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(to_dict(response))
 
+    @app.post("/api/patches/search")
+    def search_patches(payload: dict) -> JSONResponse:
+        try:
+            result = patch_selector.search(payload)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(to_dict(result))
+
     @app.post("/api/session/reset")
     def reset_session(payload: dict) -> dict:
         session_id = str(payload.get("session_id") or "default")
@@ -306,6 +320,8 @@ def create_app(agent: ReportAgent | None = None):
 
 
 def make_handler(agent: ReportAgent):
+    patch_selector = PatchSelectionService()
+
     class AgentHandler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args) -> None:
             print(f"{self.address_string()} - {fmt % args}")
@@ -348,6 +364,9 @@ def make_handler(agent: ReportAgent):
             if parsed.path == "/api/session/reset":
                 self._reset_session()
                 return
+            if parsed.path == "/api/patches/search":
+                self._search_patches()
+                return
             if parsed.path != "/api/report":
                 self.send_error(404)
                 return
@@ -362,6 +381,17 @@ def make_handler(agent: ReportAgent):
                 json_response(self, {"status": "error", "error": str(exc)}, status=400)
                 return
             json_response(self, to_dict(response))
+
+        def _search_patches(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length)
+            try:
+                payload = json.loads(raw.decode("utf-8") or "{}")
+                result = patch_selector.search(payload)
+            except Exception as exc:
+                json_response(self, {"status": "error", "error": str(exc)}, status=400)
+                return
+            json_response(self, to_dict(result))
 
         def _reset_session(self) -> None:
             length = int(self.headers.get("Content-Length", "0"))
