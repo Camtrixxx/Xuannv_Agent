@@ -38,6 +38,8 @@ class ReportRequest:
     prompt: str
     time_range: str = ""
     session_id: str = "default"
+    selected_patch_ids: list[str] = field(default_factory=list)
+    aoi: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ReportRequest":
@@ -49,6 +51,8 @@ class ReportRequest:
             prompt=prompt,
             time_range=raw_time_range,
             session_id=str(payload.get("session_id") or "default"),
+            selected_patch_ids=[str(item) for item in (payload.get("selected_patch_ids") or []) if str(item).strip()],
+            aoi=payload.get("aoi") if isinstance(payload.get("aoi"), dict) else {},
         )
 
 
