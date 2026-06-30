@@ -78,13 +78,14 @@ class ReportAgent:
         return self.memory_service.list_sessions(limit=limit)
 
     def _response_from_state(self, request: ReportRequest, state: ReportAgentState) -> AgentResponse:
+        response_request = state.get("request") or request
         return AgentResponse(
             status=str(state.get("status") or "ok"),
-            request=request,
+            request=response_request,
             intent=state.get("intent"),
             message=str(state.get("message") or ""),
-            session_id=request.session_id,
-            memory=self.memory_service.snapshot(request.session_id),
+            session_id=response_request.session_id,
+            memory=self.memory_service.snapshot(response_request.session_id),
             analysis=state.get("analysis"),
             report=state.get("report"),
             debug=state.get("debug") or {},
@@ -247,6 +248,8 @@ class ReportAgent:
             prompt=intent.user_prompt,
             time_range=intent.time_range,
             session_id=state["request"].session_id,
+            selected_patch_ids=state["request"].selected_patch_ids,
+            aoi=state["request"].aoi,
         )
         state["request"] = normalized_request
         state["analysis"] = self.analysis_service.analyze(normalized_request)

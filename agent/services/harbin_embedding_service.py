@@ -93,6 +93,11 @@ class HarbinEmbeddingAnalysisService:
         class_names = [str(item.get("name") or item.get("id")) for item in classes]
         metrics = self._build_metrics(request, task_display, task_id, patch, class_names, task_summary)
         findings = self._build_findings(request, task_id, patch, class_names, task_summary)
+        patch_note = (
+            f"本次使用前端地图选择的 patch：{patch_id}。"
+            if request.selected_patch_ids
+            else f"patch 选择仍为临时确定性策略，本次样本为 {patch_id}；后续可替换为 AOI 到 patch 的空间检索。"
+        )
         return AnalysisResult(
             task=task_display,
             region="哈尔滨新区",
@@ -107,7 +112,7 @@ class HarbinEmbeddingAnalysisService:
             method_notes=[
                 f"Agent 将用户需求标准化为 region=harbin、task={task_id}、month={request.time_range}。",
                 f"本次调用哈尔滨新区 embedding-api：{self.config.base_url}。",
-                f"patch 选择仍为临时确定性策略，本次样本为 {patch_id}；后续可替换为 AOI 到 patch 的空间检索。",
+                patch_note,
             ],
             limitations=[
                 "当前接入的是 patch 级系统模型推理结果，尚未按完整行政区 AOI 汇总。",
@@ -126,6 +131,8 @@ class HarbinEmbeddingAnalysisService:
                 "version": self.config.version,
                 "month": request.time_range,
                 "patch": patch,
+                "selected_patch_ids": request.selected_patch_ids,
+                "aoi": request.aoi,
                 "classes": classes,
                 "system_model_result": result,
                 "task_summary": task_summary,
@@ -148,6 +155,18 @@ class HarbinEmbeddingAnalysisService:
             )
 
     def _select_patches(self, request: ReportRequest, task_id: str) -> list[dict[str, Any]]:
+        if request.selected_patch_ids:
+            selected = []
+            for patch_id in request.selected_patch_ids[: self.config.sample_count]:
+                patch = self._get_json(f"/regions/harbin/patches/{patch_id}")
+                if self._is_usable_patch(patch, task_id, request.time_range):
+                    selected.append(patch)
+            if selected:
+                return selected
+            raise RuntimeError(
+                f"前端选择的 patch 不支持 {request.time_range} / {task_id}，请重新框选区域。"
+            )
+
         patches: list[dict[str, Any]] = []
         page = 1
         while True:
@@ -156,9 +175,7 @@ class HarbinEmbeddingAnalysisService:
             patches.extend(
                 item
                 for item in batch
-                if item.get("has_embedding")
-                and request.time_range in (item.get("available_months") or [])
-                and (aef_available(task_id, item) if task_id in STATIC_TASKS else True)
+                if self._is_usable_patch(item, task_id, request.time_range)
             )
             if not payload.get("has_next"):
                 break
@@ -166,6 +183,15 @@ class HarbinEmbeddingAnalysisService:
         if not patches:
             raise RuntimeError(f"没有找到支持 {request.time_range} 的哈尔滨 patch。")
         return _stable_pick(patches, f"{request.region}-{request.task}-{request.time_range}-{task_id}", self.config.sample_count)
+
+    def _is_usable_patch(self, patch: dict[str, Any], task_id: str, time_range: str) -> bool:
+        if not patch.get("has_embedding"):
+            return False
+        if time_range not in (patch.get("available_months") or []):
+            return False
+        if task_id in STATIC_TASKS and not aef_available(task_id, patch):
+            return False
+        return True
 
     def _infer_system_model(self, task_id: str, patch_id: str, month: str) -> dict[str, Any]:
         query = urlencode(
@@ -278,7 +304,11 @@ class HarbinEmbeddingAnalysisService:
             MetricCard("地区", "哈尔滨新区", "哈尔滨 embedding-api 区域标识 harbin"),
             MetricCard("时间", request.time_range, "用户指定的分析月份"),
             MetricCard("接口模式", self._task_mode(task_id), "当前专题使用的哈尔滨 API 能力"),
-            MetricCard("Patch", str(patch.get("patch_id") or "暂无"), "临时 patch 选择器命中的样本"),
+            MetricCard(
+                "Patch",
+                str(patch.get("patch_id") or "暂无"),
+                "前端地图选中的样本" if request.selected_patch_ids else "临时 patch 选择器命中的样本",
+            ),
             MetricCard("可用月份", str(len(patch.get("available_months") or [])), "当前 patch 可查询的 embedding 月份数"),
             MetricCard("经纬度范围", bounds_text, "当前 patch 的 WGS84 边界"),
         ]
@@ -360,7 +390,11 @@ class HarbinEmbeddingAnalysisService:
             },
             {
                 "title": "Patch 选择",
-                "text": f"当前采用确定性临时策略选择 {patch.get('patch_id')}，保证相同地区、任务和月份会复用同一个样本，便于联调复现。",
+                "text": (
+                    f"当前使用前端地图选择的 {patch.get('patch_id')}，报告结果与用户框选区域建立了明确关联。"
+                    if request.selected_patch_ids
+                    else f"当前采用确定性临时策略选择 {patch.get('patch_id')}，保证相同地区、任务和月份会复用同一个样本，便于联调复现。"
+                ),
             },
         ]
 
