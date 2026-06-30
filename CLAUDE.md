@@ -23,7 +23,7 @@ uvicorn agent.backend.app:app --host 0.0.0.0 --port 7870
 python -m agent.backend.app --legacy-http
 
 # --- AEF inference service ---
-# Start AEF inference (requires AEF_CODE_ROOT pointing to training repo)
+# Start AEF inference (defaults to AEF_CODE_ROOT=/data/heyuhang/yajiang-aef)
 python -m aef_inference.server --host 127.0.0.1 --port 7862
 # With custom model paths:
 python -m aef_inference.server \
@@ -44,7 +44,14 @@ scripts/status_aef_inference_service.sh
 scripts/stop_aef_inference_service.sh
 ```
 
-There are no test suites in this repository.
+There is no formal test suite yet. Use Python compilation plus service smoke tests:
+
+```bash
+python -m py_compile $(find agent aef_inference -name '*.py' -print)
+scripts/status_services.sh
+curl --noproxy '*' -sS http://127.0.0.1:7870/api/health
+curl --noproxy '*' -sS http://127.0.0.1:7862/api/health
+```
 
 ## Architecture
 

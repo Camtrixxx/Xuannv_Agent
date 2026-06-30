@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,6 +16,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+DEFAULT_AEF_CODE_ROOT = Path(os.getenv("AEF_CODE_ROOT", "/data/heyuhang/yajiang-aef"))
+if str(DEFAULT_AEF_CODE_ROOT) not in sys.path:
+    sys.path.insert(0, str(DEFAULT_AEF_CODE_ROOT))
 
 from src.config import load_config
 from src.data.dataset import YajiangAEFDataset, aef_collate_fn
@@ -52,9 +57,6 @@ TASK_ALIASES = {
     "地形重建": "dem",
     "dem重建": "dem",
 }
-
-DEFAULT_AEF_CODE_ROOT = Path(os.getenv("AEF_CODE_ROOT", "/data/heyuhang/yajiang-aef"))
-
 
 def _default_path(env_name: str, relative_path: str) -> Path:
     return Path(os.getenv(env_name, str(DEFAULT_AEF_CODE_ROOT / relative_path)))
