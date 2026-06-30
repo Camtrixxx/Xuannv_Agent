@@ -91,6 +91,7 @@ scripts/stop_aef_inference_service.sh
 
 ```text
 GET  /api/health
+POST /api/patches/search
 POST /api/report
 GET  /api/sessions
 GET  /api/session/{session_id}

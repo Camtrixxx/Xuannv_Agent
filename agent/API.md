@@ -221,6 +221,68 @@ absolute_html_url = AGENT_BASE_URL + response.report.html_url
 absolute_image_url = AGENT_BASE_URL + response.analysis.charts[0].url
 ```
 
+### `POST /api/patches/search`
+
+地图选区到 patch 的检索接口。前端框选地图后，把 bbox 交给 Agent，由 Agent 代理查询区域 patch 服务并返回候选 patch。
+
+当前支持情况：
+
+| 地区 | 支持情况 |
+| --- | --- |
+| `哈尔滨新区` | 支持 bbox 检索 patch |
+| `雅江区域` | 暂未接入本地 patch 空间索引，仍使用临时选择器 |
+
+请求示例：
+
+```json
+{
+  "region": "哈尔滨新区",
+  "task": "土地利用分类",
+  "time_range": "2025-09",
+  "bbox": [126.5, 45.74, 126.57, 45.765],
+  "limit": 10
+}
+```
+
+响应示例：
+
+```json
+{
+  "status": "ok",
+  "region": "哈尔滨新区",
+  "region_id": "harbin",
+  "task": "land_use_classification",
+  "time_range": "2025-09",
+  "bbox": [126.5, 45.74, 126.57, 45.765],
+  "selected_patch_ids": ["patch_000002"],
+  "patches": [
+    {
+      "patch_id": "patch_000002",
+      "bounds_wgs84": [126.549189, 45.744418, 126.565129, 45.75628],
+      "available_months": ["2025-04", "2025-06", "2025-09"],
+      "available_tasks": ["land_use_classification", "building_extraction"],
+      "score": 1.0
+    }
+  ]
+}
+```
+
+生成报告时，前端应把用户选中的 patch 带到 `/api/report`：
+
+```json
+{
+  "session_id": "frontend-session-001",
+  "region": "哈尔滨新区",
+  "task": "土地利用分类",
+  "prompt": "给我一份去年九月份哈尔滨新区土地利用分类报告",
+  "selected_patch_ids": ["patch_000002"],
+  "aoi": {
+    "type": "bbox",
+    "coordinates": [126.5, 45.74, 126.57, 45.765]
+  }
+}
+```
+
 ### `GET /api/sessions?limit=30`
 
 获取最近会话列表。
