@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PYTHON="${PYTHON:-python}"
+PYTHON="${PYTHON:-/opt/miniconda3/envs/hyh-dl/bin/python}"
 HOST="${AGENT_HOST:-0.0.0.0}"
 PORT="${AGENT_PORT:-7870}"
 LOG_DIR="${PROJECT_ROOT}/agent/runtime/logs"
@@ -20,6 +20,13 @@ if [[ -f "${PID_FILE}" ]]; then
     echo "Agent backend is already running: ${old_pid}"
     exit 0
   fi
+fi
+
+existing_pid="$(pgrep -f "(agent.backend.app|uvicorn agent.backend.app:app).*--port ${PORT}" || true)"
+if [[ -n "${existing_pid}" ]]; then
+  echo "Agent backend is already running on port ${PORT}: ${existing_pid}"
+  echo "${existing_pid%%$'\n'*}" > "${PID_FILE}"
+  exit 0
 fi
 
 echo "Starting Xuannv Agent backend on ${HOST}:${PORT}"

@@ -2,11 +2,11 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PORT="${AGENT_PORT:-7870}"
-PID_FILE="${PROJECT_ROOT}/agent/runtime/pids/agent_backend.pid"
-LOG_FILE="${PROJECT_ROOT}/agent/runtime/logs/agent_backend.log"
+PORT="${AEF_PORT:-7862}"
+PID_FILE="${PROJECT_ROOT}/agent/runtime/pids/aef_inference.pid"
+LOG_FILE="${PROJECT_ROOT}/agent/runtime/logs/aef_inference.log"
 
-echo "== Agent backend process =="
+echo "== AEF inference process =="
 if [[ -f "${PID_FILE}" ]]; then
   pid="$(cat "${PID_FILE}" || true)"
   if [[ -n "${pid}" ]] && kill -0 "${pid}" >/dev/null 2>&1; then
@@ -15,7 +15,7 @@ if [[ -f "${PID_FILE}" ]]; then
     echo "not running (stale pid: ${pid:-empty})"
   fi
 else
-  pgrep -af "(agent.backend.app|uvicorn agent.backend.app:app).*--port ${PORT}" || echo "not started"
+  pgrep -af "aef_inference.server.*--port ${PORT}" || echo "not started"
 fi
 
 echo
