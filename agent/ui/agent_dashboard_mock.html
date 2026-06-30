@@ -4,6 +4,10 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>遥感报告助手 - 单屏聊天原型</title>
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  />
   <style>
     :root {
       --bg: #f6f7f9;
@@ -694,7 +698,7 @@
     }
 
     .modal {
-      width: min(780px, 100%);
+      width: min(1080px, 100%);
       background: var(--card);
       border-radius: 20px;
       box-shadow: var(--shadow);
@@ -727,33 +731,242 @@
     .modal-body {
       padding: 16px;
       display: grid;
-      grid-template-columns: 1.25fr 1fr;
+      grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.9fr);
       gap: 14px;
     }
 
     .map {
-      min-height: 310px;
+      min-height: 430px;
       border: 1px solid var(--line);
       border-radius: 16px;
       position: relative;
       overflow: hidden;
-      background:
-        radial-gradient(ellipse at 30% 35%, rgba(22, 163, 74, 0.55) 0 12%, transparent 12.5%),
-        radial-gradient(ellipse at 70% 55%, rgba(234, 179, 8, 0.44) 0 15%, transparent 15.5%),
-        linear-gradient(118deg, transparent 0 44%, rgba(37, 99, 235, 0.48) 44.5% 47%, transparent 47.5%),
-        repeating-linear-gradient(36deg, rgba(255,255,255,0.16) 0 2px, transparent 2px 18px),
-        #dce8df;
+      background: #dbe6de;
     }
 
-    .aoi {
+    #leafletMap {
       position: absolute;
-      left: 28%;
-      top: 24%;
-      width: 40%;
-      height: 42%;
-      border: 3px solid #fff;
-      outline: 2px solid var(--primary);
-      background: rgba(37, 99, 235, 0.08);
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 1;
+    }
+
+    .leaflet-pane,
+    .leaflet-tile,
+    .leaflet-marker-icon,
+    .leaflet-marker-shadow,
+    .leaflet-tile-container,
+    .leaflet-pane > svg,
+    .leaflet-pane > canvas,
+    .leaflet-zoom-box,
+    .leaflet-image-layer,
+    .leaflet-layer {
+      position: absolute;
+      left: 0;
+      top: 0;
+    }
+
+    .leaflet-container {
+      overflow: hidden;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .leaflet-container img.leaflet-tile {
+      max-width: none !important;
+      max-height: none !important;
+      width: 256px;
+      height: 256px;
+    }
+
+    .leaflet-container {
+      width: 100%;
+      height: 100%;
+      background: #dbe6de;
+    }
+
+    .leaflet-tile {
+      visibility: hidden;
+      user-select: none;
+      -webkit-user-drag: none;
+    }
+
+    .leaflet-tile-loaded {
+      visibility: inherit;
+    }
+
+    .leaflet-pane {
+      z-index: 400;
+    }
+
+    .leaflet-tile-pane {
+      z-index: 200;
+    }
+
+    .leaflet-overlay-pane {
+      z-index: 400;
+    }
+
+    .leaflet-marker-pane {
+      z-index: 600;
+    }
+
+    .leaflet-tooltip-pane {
+      z-index: 650;
+    }
+
+    .leaflet-popup-pane {
+      z-index: 700;
+    }
+
+    .leaflet-control {
+      position: relative;
+      z-index: 800;
+      pointer-events: auto;
+    }
+
+    .leaflet-top,
+    .leaflet-bottom {
+      position: absolute;
+      z-index: 1000;
+      pointer-events: none;
+    }
+
+    .leaflet-top {
+      top: 0;
+    }
+
+    .leaflet-right {
+      right: 0;
+    }
+
+    .leaflet-bottom {
+      bottom: 0;
+    }
+
+    .leaflet-left {
+      left: 0;
+    }
+
+    .leaflet-control {
+      float: left;
+      clear: both;
+      margin: 10px;
+    }
+
+    .leaflet-right .leaflet-control {
+      float: right;
+    }
+
+    .leaflet-control-zoom a {
+      display: block;
+      width: 28px;
+      height: 28px;
+      line-height: 28px;
+      text-align: center;
+      background: #fff;
+      color: #1f2937;
+      border-bottom: 1px solid #d1d5db;
+      text-decoration: none;
+      font-weight: 800;
+    }
+
+    .leaflet-control-zoom a:first-child {
+      border-radius: 6px 6px 0 0;
+    }
+
+    .leaflet-control-zoom a:last-child {
+      border-bottom: 0;
+      border-radius: 0 0 6px 6px;
+    }
+
+    .leaflet-control-zoom {
+      margin-top: 70px !important;
+    }
+
+    .map-tools {
+      position: absolute;
+      left: 12px;
+      right: 12px;
+      top: 12px;
+      z-index: 2;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, max-content));
+      gap: 8px;
+      align-items: start;
+      justify-content: start;
+      pointer-events: none;
+    }
+
+    .map-tools button {
+      pointer-events: auto;
+    }
+
+    .map-tools button {
+      border: 1px solid rgba(15, 23, 42, 0.12);
+      background: #fff;
+      color: #1f2937;
+      border-radius: 10px;
+      padding: 7px 10px;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
+    }
+
+    .patch-list {
+      display: grid;
+      gap: 8px;
+      max-height: 236px;
+      overflow: auto;
+      padding-right: 2px;
+    }
+
+    .patch-item {
+      text-align: left;
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 12px;
+      padding: 10px;
+      cursor: pointer;
+    }
+
+    .patch-item.active {
+      border-color: #93c5fd;
+      background: #eff6ff;
+    }
+
+    .patch-item strong {
+      display: block;
+      font-size: 13px;
+      margin-bottom: 3px;
+    }
+
+    .patch-item span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .map-note {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .map-confirm {
+      border: 0;
+      border-radius: 12px;
+      background: var(--primary);
+      color: #fff;
+      padding: 10px 12px;
+      cursor: pointer;
+      font-weight: 800;
+    }
+
+    .map-confirm:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
     }
 
     .regions {
@@ -827,6 +1040,14 @@
 
       .map {
         min-height: 220px;
+      }
+
+      .map-tools {
+        grid-template-columns: repeat(2, minmax(0, max-content));
+      }
+
+      .leaflet-control-zoom {
+        margin-top: 106px !important;
       }
 
       .report-stats {
@@ -934,7 +1155,12 @@
       </div>
       <div class="modal-body">
         <div class="map">
-          <div class="aoi" id="aoi"></div>
+          <div id="leafletMap"></div>
+          <div class="map-tools">
+            <button id="startMapSelect" type="button">框选区域</button>
+            <button id="searchVisiblePatches" type="button">检索当前视野</button>
+            <button id="toggleBaseLayer" type="button">卫星图层</button>
+          </div>
         </div>
         <div class="regions">
           <button class="region active" data-region="雅江区域">
@@ -949,11 +1175,17 @@
             <strong>北京市海淀区</strong>
             <span>城市建设区、公园绿地、水体</span>
           </button>
+          <div class="map-note" id="patchStatus"></div>
+          <div class="patch-list" id="patchList"></div>
+          <button class="map-confirm" id="confirmPatchSelection" type="button" disabled>使用选中 Patch</button>
         </div>
       </div>
     </div>
   </div>
 
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  ></script>
   <script>
     let currentTask = "地物分类";
     let currentRegion = "雅江区域";
@@ -968,17 +1200,21 @@
     const regionData = {
       "雅江区域": {
         main: "林地/草地",
-        box: ["28%", "24%", "40%", "42%"],
+        center: [30.03, 101.02],
+        zoom: 10,
         summary: "区域内林地、草地和裸地占比较高，水体主要沿河谷呈线状分布，适合用于山地生态和水体相关快速研判。"
       },
       "哈尔滨新区": {
         main: "耕地/水体",
-        box: ["18%", "20%", "48%", "38%"],
+        center: [45.752, 126.548],
+        zoom: 13,
+        defaultBbox: [126.5, 45.74, 126.57, 45.765],
         summary: "区域内耕地和建设用地分布明显，水体沿松花江及支流展开，适合用于城市周边地表覆盖和水体格局研判。"
       },
       "北京市海淀区": {
         main: "建设用地",
-        box: ["38%", "26%", "32%", "42%"],
+        center: [39.96, 116.30],
+        zoom: 11,
         summary: "区域内建设用地占比较高，绿地主要分布在西部山前地带和公园片区，水体呈局部斑块状分布。"
       }
     };
@@ -987,14 +1223,27 @@
     const sessionList = document.getElementById("sessionList");
     const mapModal = document.getElementById("mapModal");
     const openMap = document.getElementById("openMap");
-    const aoi = document.getElementById("aoi");
     const app = document.querySelector(".app");
+    const patchStatus = document.getElementById("patchStatus");
+    const patchList = document.getElementById("patchList");
+    const confirmPatchSelection = document.getElementById("confirmPatchSelection");
     const previewTitle = document.getElementById("previewTitle");
     const previewMeta = document.getElementById("previewMeta");
     const previewBody = document.getElementById("previewBody");
     const previewOpenRaw = document.getElementById("previewOpenRaw");
     const toggleMarkdownRaw = document.getElementById("toggleMarkdownRaw");
     let currentMarkdownPreview = null;
+    let leafletMap = null;
+    let selectingMap = false;
+    let selectStartLatLng = null;
+    let selectedAoi = null;
+    let selectedPatchIds = [];
+    let candidatePatches = [];
+    let selectionLayer = null;
+    let patchLayers = [];
+    let mapResizeObserver = null;
+    let baseLayers = {};
+    let activeBaseLayer = "standard";
 
     function addMessage(html, type) {
       const node = document.createElement("div");
@@ -1203,12 +1452,262 @@
     }
 
     function updateMapLabel() {
-      openMap.textContent = `选择地图：${currentRegion}`;
-      const box = regionData[currentRegion].box;
-      aoi.style.left = box[0];
-      aoi.style.top = box[1];
-      aoi.style.width = box[2];
-      aoi.style.height = box[3];
+      const patchText = selectedPatchIds.length ? ` · ${selectedPatchIds[0]}` : "";
+      openMap.textContent = `选择地图：${currentRegion}${patchText}`;
+      const data = regionData[currentRegion] || regionData["雅江区域"];
+      if (leafletMap) {
+        leafletMap.setView(data.center, data.zoom, {animate: false});
+        refreshLeafletMap();
+      }
+      if (currentRegion !== "哈尔滨新区") {
+        clearPatchSelection();
+        patchStatus.textContent = "当前区域暂不支持地图定位 patch。";
+      }
+    }
+
+    function clearPatchSelection() {
+      selectedAoi = null;
+      selectedPatchIds = [];
+      candidatePatches = [];
+      patchList.innerHTML = "";
+      confirmPatchSelection.disabled = true;
+      patchStatus.textContent = currentRegion === "哈尔滨新区"
+        ? ""
+        : "当前区域暂不支持地图定位 patch。";
+      patchLayers.forEach((layer) => layer.remove());
+      patchLayers = [];
+      if (selectionLayer) {
+        selectionLayer.remove();
+        selectionLayer = null;
+      }
+    }
+
+    function initLeafletMap() {
+      if (leafletMap || !window.L) {
+        if (leafletMap) {
+          refreshLeafletMap();
+        }
+        return;
+      }
+      const data = regionData[currentRegion] || regionData["雅江区域"];
+      leafletMap = L.map("leafletMap", {zoomControl: true}).setView(data.center, data.zoom);
+      baseLayers.standard = L.tileLayer("https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}", {
+        subdomains: ["1", "2", "3", "4"],
+        maxZoom: 18,
+        attribution: "&copy; 高德地图"
+      });
+      baseLayers.satellite = L.tileLayer("https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}", {
+        subdomains: ["1", "2", "3", "4"],
+        maxZoom: 18,
+        attribution: "&copy; 高德卫星"
+      });
+      Object.values(baseLayers).forEach((layer) => {
+        layer.on("tileerror", () => {
+          patchStatus.textContent = "底图瓦片加载不稳定时，patch 边界仍可正常框选和检索。";
+        });
+      });
+      baseLayers.standard.addTo(leafletMap);
+
+      L.control.layers(
+        {"标准地图": baseLayers.standard, "卫星影像": baseLayers.satellite},
+        {},
+        {position: "bottomleft", collapsed: true}
+      ).addTo(leafletMap);
+
+      if (window.ResizeObserver && !mapResizeObserver) {
+        mapResizeObserver = new ResizeObserver(() => refreshLeafletMap());
+        mapResizeObserver.observe(document.querySelector(".map"));
+      }
+
+      leafletMap.on("mousedown", (event) => {
+        if (!selectingMap) {
+          return;
+        }
+        selectStartLatLng = event.latlng;
+        leafletMap.dragging.disable();
+        if (selectionLayer) {
+          selectionLayer.remove();
+        }
+        selectionLayer = L.rectangle([event.latlng, event.latlng], {
+          color: "#2563eb",
+          weight: 2,
+          fillColor: "#2563eb",
+          fillOpacity: 0.12
+        }).addTo(leafletMap);
+      });
+
+      leafletMap.on("mousemove", (event) => {
+        if (!selectingMap || !selectStartLatLng || !selectionLayer) {
+          return;
+        }
+        selectionLayer.setBounds(L.latLngBounds(selectStartLatLng, event.latlng));
+      });
+
+      leafletMap.on("mouseup", async (event) => {
+        if (!selectingMap || !selectStartLatLng || !selectionLayer) {
+          return;
+        }
+        selectionLayer.setBounds(L.latLngBounds(selectStartLatLng, event.latlng));
+        const bounds = selectionLayer.getBounds();
+        selectedAoi = {
+          type: "bbox",
+          coordinates: [
+            bounds.getWest(),
+            bounds.getSouth(),
+            bounds.getEast(),
+            bounds.getNorth()
+          ]
+        };
+        selectingMap = false;
+        selectStartLatLng = null;
+        leafletMap.dragging.enable();
+        await searchPatches(selectedAoi.coordinates);
+      });
+
+      refreshLeafletMap();
+    }
+
+    function toggleBaseLayer() {
+      if (!leafletMap || !baseLayers.standard || !baseLayers.satellite) {
+        return;
+      }
+      const nextLayer = activeBaseLayer === "standard" ? "satellite" : "standard";
+      leafletMap.removeLayer(baseLayers[activeBaseLayer]);
+      baseLayers[nextLayer].addTo(leafletMap);
+      activeBaseLayer = nextLayer;
+      document.getElementById("toggleBaseLayer").textContent = activeBaseLayer === "standard" ? "卫星图层" : "标准地图";
+      refreshLeafletMap();
+    }
+
+    function refreshLeafletMap() {
+      if (!leafletMap) {
+        return;
+      }
+      const refresh = () => {
+        if (!leafletMap || !mapModal.classList.contains("show")) {
+          return;
+        }
+        leafletMap.invalidateSize({pan: false});
+      };
+      requestAnimationFrame(refresh);
+      [80, 240, 600].forEach((delay) => setTimeout(refresh, delay));
+    }
+
+    function setMapSelecting() {
+      if (currentRegion !== "哈尔滨新区") {
+        patchStatus.textContent = "请先选择哈尔滨新区；雅江和海淀暂未接入地图 patch 检索。";
+        return;
+      }
+      selectingMap = true;
+      patchStatus.textContent = "";
+    }
+
+    function bboxFromCurrentMap() {
+      if (!leafletMap) {
+        return regionData["哈尔滨新区"].defaultBbox;
+      }
+      const bounds = leafletMap.getBounds();
+      return [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()];
+    }
+
+    function extractTimeRangeFromPrompt(text) {
+      const value = String(text || "");
+      const numeric = value.match(/(20\d{2})\s*年?\s*(1[0-2]|0?[1-9])\s*月/);
+      if (numeric) {
+        return `${numeric[1]}-${String(Number(numeric[2])).padStart(2, "0")}`;
+      }
+      const monthMap = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10, "十一": 11, "十二": 12};
+      const monthMatch = value.match(/(十一|十二|十|一|二|三|四|五|六|七|八|九)月/);
+      if (!monthMatch) {
+        return "";
+      }
+      const now = new Date();
+      let year = now.getFullYear();
+      if (value.includes("去年")) {
+        year -= 1;
+      }
+      if (value.includes("前年")) {
+        year -= 2;
+      }
+      return `${year}-${String(monthMap[monthMatch[1]]).padStart(2, "0")}`;
+    }
+
+    async function searchPatches(bbox) {
+      if (currentRegion !== "哈尔滨新区") {
+        patchStatus.textContent = "当前区域暂不支持地图定位 patch。";
+        return;
+      }
+      patchStatus.textContent = "正在检索候选 patch。";
+      patchList.innerHTML = "";
+      patchLayers.forEach((layer) => layer.remove());
+      patchLayers = [];
+      selectedPatchIds = [];
+      confirmPatchSelection.disabled = true;
+      try {
+        const response = await fetch("/api/patches/search", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            region: currentRegion,
+            task: currentTask,
+            time_range: extractTimeRangeFromPrompt(document.getElementById("prompt").value),
+            bbox,
+            limit: 12
+          })
+        });
+        const payload = await response.json();
+        if (!response.ok || payload.status !== "ok") {
+          throw new Error(payload.detail || payload.message || "patch 检索失败");
+        }
+        candidatePatches = payload.patches || [];
+        renderPatchCandidates();
+      } catch (error) {
+        patchStatus.textContent = `检索失败：${error.message || "未知错误"}`;
+      }
+    }
+
+    function renderPatchCandidates() {
+      if (!candidatePatches.length) {
+        patchStatus.textContent = "当前范围没有找到可用 patch。";
+        return;
+      }
+      selectedPatchIds = [candidatePatches[0].patch_id];
+      confirmPatchSelection.disabled = false;
+      patchStatus.textContent = `找到 ${candidatePatches.length} 个候选 patch，已默认选择第一个。`;
+      patchList.innerHTML = candidatePatches.map((patch, index) => `
+        <button class="patch-item ${index === 0 ? "active" : ""}" data-patch-id="${escapeHtml(patch.patch_id)}" type="button">
+          <strong>${escapeHtml(patch.patch_id)}</strong>
+          <span>重叠分数：${escapeHtml(String(patch.score ?? "暂无"))}</span>
+          <span>月份：${escapeHtml((patch.available_months || []).slice(0, 5).join(", "))}</span>
+          <span>任务：${escapeHtml((patch.available_tasks || []).join(", ") || "实时推理")}</span>
+        </button>
+      `).join("");
+      candidatePatches.forEach((patch, index) => {
+        const bounds = patch.bounds_wgs84 || [];
+        if (bounds.length !== 4) {
+          return;
+        }
+        const layer = L.rectangle([[bounds[1], bounds[0]], [bounds[3], bounds[2]]], {
+          color: index === 0 ? "#2563eb" : "#16a34a",
+          weight: index === 0 ? 3 : 1,
+          fillOpacity: index === 0 ? 0.16 : 0.08
+        }).addTo(leafletMap);
+        layer.bindPopup(`${patch.patch_id}`);
+        patchLayers.push(layer);
+      });
+    }
+
+    function selectPatch(patchId) {
+      selectedPatchIds = [patchId];
+      patchList.querySelectorAll(".patch-item").forEach((item) => {
+        item.classList.toggle("active", item.dataset.patchId === patchId);
+      });
+      patchLayers.forEach((layer) => {
+        const selected = layer.getPopup()?.getContent() === patchId;
+        layer.setStyle({color: selected ? "#2563eb" : "#16a34a", weight: selected ? 3 : 1, fillOpacity: selected ? 0.16 : 0.08});
+      });
+      patchStatus.textContent = `已选择 ${patchId}。`;
+      confirmPatchSelection.disabled = false;
     }
 
     function escapeHtml(value) {
@@ -1433,7 +1932,9 @@
             session_id: sessionId,
             task: currentTask,
             region: currentRegion,
-            prompt: prompt
+            prompt: prompt,
+            selected_patch_ids: selectedPatchIds,
+            aoi: selectedAoi || {}
           })
         });
         const payload = await response.json();
@@ -1494,15 +1995,46 @@
         document.querySelectorAll(".tag").forEach((item) => item.classList.remove("active"));
         tag.classList.add("active");
         currentTask = tag.dataset.task;
+        clearPatchSelection();
+        updateMapLabel();
       });
     });
 
     openMap.addEventListener("click", () => {
       mapModal.classList.add("show");
+      initLeafletMap();
+      updateMapLabel();
+      refreshLeafletMap();
     });
 
     document.getElementById("closeMap").addEventListener("click", () => {
       mapModal.classList.remove("show");
+    });
+
+    document.getElementById("startMapSelect").addEventListener("click", setMapSelecting);
+
+    document.getElementById("searchVisiblePatches").addEventListener("click", async () => {
+      selectedAoi = {type: "bbox", coordinates: bboxFromCurrentMap()};
+      await searchPatches(selectedAoi.coordinates);
+    });
+
+    document.getElementById("toggleBaseLayer").addEventListener("click", toggleBaseLayer);
+
+    patchList.addEventListener("click", (event) => {
+      const item = event.target.closest(".patch-item");
+      if (!item) {
+        return;
+      }
+      selectPatch(item.dataset.patchId);
+    });
+
+    confirmPatchSelection.addEventListener("click", () => {
+      if (!selectedPatchIds.length) {
+        return;
+      }
+      updateMapLabel();
+      mapModal.classList.remove("show");
+      addMessage(`已选择 ${escapeHtml(currentRegion)} 的 ${escapeHtml(selectedPatchIds[0])}，后续报告会优先使用这个 patch。`, "agent");
     });
 
     mapModal.addEventListener("click", (event) => {
@@ -1516,8 +2048,8 @@
         document.querySelectorAll(".region").forEach((item) => item.classList.remove("active"));
         region.classList.add("active");
         currentRegion = region.dataset.region;
+        clearPatchSelection();
         updateMapLabel();
-        mapModal.classList.remove("show");
       });
     });
 
