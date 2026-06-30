@@ -1,128 +1,180 @@
 # Xuannv Agent
 
-面向遥感专题报告的 Agent 服务。该仓库包含 Agent 后端、前端 mock、会话记忆、报告生成、区域模型 API 适配层，以及面向 Agent 的 AEF 推理服务壳；模型训练工程、大体量数据资产和模型权重不放在这里。
+遥感专题报告 Agent。它把用户的自然语言需求整理成标准化任务，调用区域模型服务完成分析，并生成带图表、指标和文字解读的 HTML / Markdown 报告。
 
-## 当前能力
+这个仓库只放 Agent 系统和面向 Agent 的推理服务运行时；训练工程、模型权重、原始数据和大体量推理产物不放在这里。
 
-- 多轮会话与 SQLite 持久记忆
-- 自然语言意图解析、月份补槽和历史槽位确认
-- 报告生成，输出 HTML / Markdown / 图片资产
-- 雅江区域：调用外部 AEF 推理服务
-- 哈尔滨新区：调用在线 embedding-api
-  - 建筑物提取
-  - 土地利用分类
-  - 水体提取
-- AEF 推理服务：提供 `/api/infer`、`/api/patch-rgb` 等接口给 Agent 调用
+## What It Does
 
-## 服务依赖
+- 理解用户意图：识别任务、地区、月份，缺少月份时主动追问。
+- 支持多轮会话：SQLite 记录会话、历史槽位和报告索引。
+- 编排分析流程：根据地区路由到本机 AEF 服务或在线区域 API。
+- 生成专题报告：输出结构化指标、图片资产、HTML 报告和 Markdown 原文。
+- 服务前端联调：提供统一 Agent API，前端不需要直接访问模型服务。
 
-Agent 是统一入口，前端只需要调用 Agent。AEF 服务可以由本仓库脚本启动，但会复用服务器上已有的模型代码、配置、数据和权重路径。
+## Current Coverage
+
+| Region | Tasks | Backend |
+| --- | --- | --- |
+| 雅江区域 | 地物分类、水体分类、高程地形 | 本机 AEF 推理服务 |
+| 哈尔滨新区 | 建筑物提取、土地利用分类、水体提取 | 在线 embedding-api |
+
+雅江 AEF 服务默认使用服务器上的 `v1_2_continue_200` 模型资源。模型路径通过环境变量配置，默认指向：
+
+```text
+/data/heyuhang/yajiang-aef
+```
+
+## Architecture
 
 ```text
 Frontend
-  -> Xuannv Agent
-      -> Yajiang AEF service, default http://127.0.0.1:7862
-      -> Harbin embedding-api, default http://60.31.21.42:22065
-      -> agent/reports/*.html, *.md, assets/*.png
+  -> Xuannv Agent :7870
+      -> Yajiang AEF Inference :7862
+      -> Harbin Embedding API
+      -> agent/reports/
 ```
 
-默认 AEF 相关路径：
+Agent 是唯一对前端暴露的业务入口。AEF 推理服务只作为内部模型能力，被 Agent 调用。
 
-```text
-AEF_CODE_ROOT=/data/heyuhang/yajiang-aef
-AEF_CONFIG=$AEF_CODE_ROOT/configs/yajiang_v1_2_continue_200.yaml
-AEF_MANIFEST=$AEF_CODE_ROOT/data/full_npy/train.jsonl
-AEF_DEPLOY_MODEL=$AEF_CODE_ROOT/outputs/aef_hyh_yajiang_v1_2_continue_200/exports/aef_hyh_yajiang_v1_2_continue_200_deploy.pt
-AEF_CACHE_DIR=$AEF_CODE_ROOT/outputs/aef_inference_service_v1_2_continue_200
-```
+## Quick Start
 
-## 快速启动
+推荐使用现有 `hyh-dl` 环境：
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+cd /data/heyuhang/Xuannv_Agent
 pip install -r requirements.txt
-
-python -m agent.backend.app --host 0.0.0.0 --port 7870
+scripts/start_services.sh
 ```
 
-打开：
-
-```text
-http://localhost:7870/
-http://localhost:7870/api-docs
-```
-
-也可以使用脚本：
+检查状态：
 
 ```bash
-scripts/start_services.sh
 scripts/status_services.sh
+```
+
+本机访问：
+
+```text
+http://127.0.0.1:7870/
+http://127.0.0.1:7870/api-docs
+```
+
+停止服务：
+
+```bash
 scripts/stop_services.sh
 ```
 
-只管理 Agent：
+## Service Scripts
 
 ```bash
+# Agent + AEF
+scripts/start_services.sh
+scripts/status_services.sh
+scripts/stop_services.sh
+
+# Agent only
 scripts/start_agent_backend.sh
 scripts/status_agent_backend.sh
 scripts/stop_agent_backend.sh
-```
 
-只管理 AEF 推理服务：
-
-```bash
+# AEF only
 scripts/start_aef_inference_service.sh
 scripts/status_aef_inference_service.sh
 scripts/stop_aef_inference_service.sh
 ```
 
-## 环境变量
+## API
 
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `DEEPSEEK_API_KEY` | 空 | 可选。未设置时使用规则解析和模板报告兜底 |
-| `DEEPSEEK_MODEL` | `deepseek-chat` | LLM 模型名 |
-| `DEEPSEEK_ENDPOINT` | `https://api.deepseek.com/chat/completions` | LLM API 地址 |
-| `AGENT_AEF_BASE_URL` | `http://127.0.0.1:7862` | 雅江 AEF 推理服务 |
-| `AGENT_EMBEDDING_API_BASE_URL` | `http://60.31.21.42:22065` | 哈尔滨/海淀 embedding-api |
-| `AGENT_PORT` | `7870` | Agent 服务端口 |
-| `AGENT_CORS_ORIGINS` | `*` | CORS 来源 |
-| `AEF_CODE_ROOT` | `/data/heyuhang/yajiang-aef` | 现有 AEF 训练/模型代码根目录 |
-| `AEF_PORT` | `7862` | AEF 推理服务端口 |
-| `AEF_CONFIG` | 见上方默认路径 | AEF 配置文件 |
-| `AEF_MANIFEST` | 见上方默认路径 | AEF 数据 manifest |
-| `AEF_DEPLOY_MODEL` | 见上方默认路径 | AEF deploy 模型权重 |
-| `AEF_CACHE_DIR` | 见上方默认路径 | AEF 推理产物缓存目录 |
+核心接口：
 
-## API 文档
+```text
+GET  /api/health
+POST /api/report
+GET  /api/sessions
+GET  /api/session/{session_id}
+POST /api/session/reset
+```
 
-详细接口见 [agent/API.md](agent/API.md)。
-
-启动服务后也可以访问：
+启动服务后访问：
 
 ```text
 /api-docs
 /docs
 ```
 
-## 目录结构
+详细接口文档见 [agent/API.md](agent/API.md)。
+
+## Configuration
+
+常用环境变量：
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DEEPSEEK_API_KEY` | empty | 可选。未设置时使用规则解析和模板报告兜底 |
+| `AGENT_PORT` | `7870` | Agent 服务端口 |
+| `AGENT_AEF_BASE_URL` | `http://127.0.0.1:7862` | 雅江 AEF 推理服务 |
+| `AGENT_EMBEDDING_API_BASE_URL` | `http://60.31.21.42:22065` | 哈尔滨 embedding-api |
+| `AGENT_CORS_ORIGINS` | `*` | CORS 来源 |
+| `AEF_CODE_ROOT` | `/data/heyuhang/yajiang-aef` | 外部模型工程根目录 |
+| `AEF_PORT` | `7862` | AEF 推理服务端口 |
+| `AEF_DEVICE` | `auto` | AEF 推理设备 |
+
+AEF 模型资源也可以显式指定：
+
+```bash
+export AEF_CONFIG=/path/to/config.yaml
+export AEF_MANIFEST=/path/to/train.jsonl
+export AEF_DEPLOY_MODEL=/path/to/model_deploy.pt
+export AEF_CACHE_DIR=/path/to/cache_dir
+```
+
+## Project Layout
 
 ```text
 agent/
-  backend/      FastAPI 入口和静态页面服务
-  graph/        Agent 状态机 / LangGraph 编排
-  schemas/      请求、响应、报告数据结构
-  services/     意图解析、记忆、报告、区域模型服务适配
-  ui/           当前 mock 前端页面
-scripts/        后台启停脚本
-aef_inference/  AEF 推理服务 API 和 runner
+  backend/      FastAPI app, API docs renderer, static report serving
+  graph/        Agent state machine and routing
+  schemas/      request / response / report data structures
+  services/     intent, memory, report, LLM, regional model adapters
+  ui/           lightweight frontend page
+
+aef_inference/
+  server.py     AEF inference FastAPI service
+  runner.py     model loading, inference, visualization, cache handling
+
+scripts/        service start / stop / status helpers
 ```
 
-## 不放入仓库的内容
+## Runtime Files
 
-- `agent/reports/`
-- `agent/runtime/`
-- 训练代码和训练配置
-- 模型权重、推理输出、大数据资产
-- API key 和 `.env`
+These paths are intentionally ignored by git:
+
+```text
+agent/reports/
+agent/runtime/
+data/
+outputs/
+checkpoints/
+models/
+```
+
+Do not commit API keys, `.env` files, model weights, generated reports, or cache artifacts.
+
+## Development Checks
+
+```bash
+python -m py_compile $(find agent aef_inference -name '*.py' -print)
+scripts/status_services.sh
+curl --noproxy '*' -sS http://127.0.0.1:7870/api/health
+curl --noproxy '*' -sS http://127.0.0.1:7862/api/health
+```
+
+## Design Notes
+
+- LLM 负责理解与表达，结构化指标来自模型服务。
+- 月份是报告生成的关键槽位；缺失时 Agent 会追问。
+- 历史月份不会被静默复用，需要用户确认。
+- 前端只调用 Agent；模型服务不直接暴露给前端。
+- 当前雅江区域仍使用临时 patch 选择器，后续可替换为正式 AOI 检索服务。
