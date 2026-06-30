@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+.env.*
+*.local
+
+# Runtime outputs
+agent/reports/
+agent/runtime/
+*.log
+
+# Data / model artifacts
+data/
+outputs/
+checkpoints/
+models/
+external/
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Build
+build/
+dist/
+*.egg-info/

@@ -1,0 +1,387 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from urllib.error import URLError
+from urllib.parse import urlencode, urljoin
+from urllib.request import ProxyHandler, Request, build_opener
+
+from agent.config import EmbeddingAPIConfig, ReportConfig
+from agent.schemas.report import AnalysisResult, ChartAsset, MetricCard, ReportRequest
+
+
+TASK_TO_HARBIN = {
+    "水体分布": "water_extraction",
+    "水体分类": "water_extraction",
+    "水体提取": "water_extraction",
+    "建筑物提取": "building_extraction",
+    "建筑提取": "building_extraction",
+    "土地利用分类": "land_use_classification",
+    "土地利用": "land_use_classification",
+    "用地分类": "land_use_classification",
+}
+
+TASK_DISPLAY = {
+    "water_extraction": "水体提取",
+    "building_extraction": "建筑物提取",
+    "land_use_classification": "土地利用分类",
+}
+
+STATIC_TASKS = {"building_extraction", "land_use_classification"}
+SYSTEM_MODEL_TASKS = {"building_extraction", "water_extraction"}
+
+HARBIN_MONTHS = [
+    "2025-04",
+    "2025-06",
+    "2025-08",
+    "2025-09",
+    "2025-10",
+    "2026-01",
+    "2026-02",
+    "2026-03",
+    "2026-04",
+    "2026-05",
+]
+
+
+def _stable_pick(items: list[dict[str, Any]], key: str, count: int) -> list[dict[str, Any]]:
+    count = max(1, min(count, len(items)))
+    return sorted(
+        items,
+        key=lambda item: hashlib.sha1(f"{key}:{item.get('patch_id')}".encode("utf-8")).hexdigest(),
+    )[:count]
+
+
+def aef_available(task_id: str, patch: dict[str, Any]) -> bool:
+    return task_id in (patch.get("available_tasks") or [])
+
+
+class HarbinEmbeddingAnalysisService:
+    """Analysis service backed by the Harbin regional embedding API."""
+
+    def __init__(
+        self,
+        config: EmbeddingAPIConfig | None = None,
+        report_config: ReportConfig | None = None,
+    ) -> None:
+        self.config = config or EmbeddingAPIConfig()
+        self.report_config = report_config or ReportConfig()
+        self.asset_dir = self.report_config.asset_dir
+        self.asset_dir.mkdir(parents=True, exist_ok=True)
+        self.opener = build_opener(ProxyHandler({}))
+
+    def analyze(self, request: ReportRequest) -> AnalysisResult:
+        task_id = self._normalize_task(request.task)
+        self._validate_month(request.time_range)
+        patches = self._select_patches(request, task_id)
+        patch = patches[0]
+        patch_id = str(patch["patch_id"])
+
+        result = self._infer_system_model(task_id, patch_id, request.time_range) if task_id in SYSTEM_MODEL_TASKS else {}
+        classes = self._get_classes(task_id) if task_id in SYSTEM_MODEL_TASKS else []
+        task_summary = self._get_task_summary(task_id) if task_id in STATIC_TASKS else {}
+        embedding_url = self._embedding_url(patch_id, request.time_range)
+        embedding_asset_url = self._copy_remote_asset(embedding_url, request, task_id, "embedding")
+
+        task_display = TASK_DISPLAY.get(task_id, request.task)
+        charts = self._build_charts(request, task_id, task_display, patch_id, result, embedding_asset_url)
+
+        class_names = [str(item.get("name") or item.get("id")) for item in classes]
+        metrics = self._build_metrics(request, task_display, task_id, patch, class_names, task_summary)
+        findings = self._build_findings(request, task_id, patch, class_names, task_summary)
+        return AnalysisResult(
+            task=task_display,
+            region="哈尔滨新区",
+            time_range=request.time_range,
+            headline=f"哈尔滨新区{request.time_range}{task_display}遥感分析",
+            summary=self._summary_text(request, task_id, patch, class_names),
+            metrics=metrics,
+            findings=findings,
+            recommendations=self._build_recommendations(task_id),
+            narrative_blocks=self._build_narratives(request, task_id, patch),
+            risks=self._build_risks(task_id),
+            method_notes=[
+                f"Agent 将用户需求标准化为 region=harbin、task={task_id}、month={request.time_range}。",
+                f"本次调用哈尔滨新区 embedding-api：{self.config.base_url}。",
+                f"patch 选择仍为临时确定性策略，本次样本为 {patch_id}；后续可替换为 AOI 到 patch 的空间检索。",
+            ],
+            limitations=[
+                "当前接入的是 patch 级系统模型推理结果，尚未按完整行政区 AOI 汇总。",
+                "报告指标主要来自 patch 元数据和模型输出图，精度评估需结合更完整的标签或评估接口补充。",
+            ],
+            confidence_notes=[
+                f"可用类别：{', '.join(class_names[:8]) if class_names else '暂无类别信息'}。",
+                f"当前月份 {request.time_range} 在哈尔滨 embedding-api 可用月份范围内。",
+            ],
+            data_source="harbin_embedding_api",
+            generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            aef_payload={
+                "service": self.config.base_url,
+                "region_id": "harbin",
+                "task": task_id,
+                "version": self.config.version,
+                "month": request.time_range,
+                "patch": patch,
+                "classes": classes,
+                "system_model_result": result,
+                "task_summary": task_summary,
+                "fingerprint": self._fingerprint(task_id, patch_id, request.time_range, {"system": result, "summary": task_summary}),
+            },
+            charts=charts,
+        )
+
+    def _normalize_task(self, task: str) -> str:
+        task_id = TASK_TO_HARBIN.get(task)
+        if task_id is None:
+            supported = "建筑物提取、土地利用分类、水体提取"
+            raise RuntimeError(f"哈尔滨新区暂不支持“{task}”，当前可用任务为：{supported}。")
+        return task_id
+
+    def _validate_month(self, month: str) -> None:
+        if month not in HARBIN_MONTHS:
+            raise RuntimeError(
+                f"哈尔滨新区当前可用月份为 {', '.join(HARBIN_MONTHS)}，收到的月份是 {month}。"
+            )
+
+    def _select_patches(self, request: ReportRequest, task_id: str) -> list[dict[str, Any]]:
+        patches: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            payload = self._get_json(f"/regions/harbin/patches?page={page}&page_size=100")
+            batch = payload.get("patches") or []
+            patches.extend(
+                item
+                for item in batch
+                if item.get("has_embedding")
+                and request.time_range in (item.get("available_months") or [])
+                and (aef_available(task_id, item) if task_id in STATIC_TASKS else True)
+            )
+            if not payload.get("has_next"):
+                break
+            page += 1
+        if not patches:
+            raise RuntimeError(f"没有找到支持 {request.time_range} 的哈尔滨 patch。")
+        return _stable_pick(patches, f"{request.region}-{request.task}-{request.time_range}-{task_id}", self.config.sample_count)
+
+    def _infer_system_model(self, task_id: str, patch_id: str, month: str) -> dict[str, Any]:
+        query = urlencode(
+            {
+                "region_id": "harbin",
+                "patch_id": patch_id,
+                "month": month,
+                "version": self.config.version,
+            }
+        )
+        return self._post_json(f"/system-models/{task_id}/infer?{query}")
+
+    def _get_classes(self, task_id: str) -> list[dict[str, Any]]:
+        query = urlencode({"region_id": "harbin", "version": self.config.version})
+        payload = self._get_json(f"/system-models/{task_id}/classes?{query}")
+        return payload if isinstance(payload, list) else []
+
+    def _get_task_summary(self, task_id: str) -> dict[str, Any]:
+        payload = self._get_json(f"/regions/harbin/tasks/{task_id}/summary?version=v1")
+        return payload if isinstance(payload, dict) else {}
+
+    def _embedding_url(self, patch_id: str, month: str) -> str:
+        query = urlencode({"format": "png", "version": self.config.version, "month": month})
+        return f"/regions/harbin/patches/{patch_id}/embedding?{query}"
+
+    def _get_json(self, path: str) -> Any:
+        return self._request_json(path, method="GET")
+
+    def _post_json(self, path: str) -> dict[str, Any]:
+        return self._request_json(path, method="POST")
+
+    def _request_json(self, path: str, method: str) -> Any:
+        url = urljoin(self.config.base_url.rstrip("/") + "/", path.lstrip("/"))
+        request = Request(url, headers={"Accept": "application/json"}, method=method)
+        try:
+            with self.opener.open(request, timeout=self.config.timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except (OSError, URLError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"哈尔滨 embedding-api 调用失败：{url}，原因：{exc}") from exc
+
+    def _copy_remote_asset(self, remote_url: str, request: ReportRequest, task_id: str, kind: str) -> str:
+        source_url = urljoin(self.config.base_url.rstrip("/") + "/", remote_url.lstrip("/"))
+        digest = hashlib.sha1(f"{source_url}-{request.time_range}-{task_id}-{kind}".encode("utf-8")).hexdigest()[:12]
+        out_path = self.asset_dir / f"harbin_{task_id}_{kind}_{digest}.png"
+        if not out_path.exists():
+            try:
+                with self.opener.open(source_url, timeout=self.config.timeout) as response, out_path.open("wb") as fh:
+                    shutil.copyfileobj(response, fh)
+            except OSError as exc:
+                raise RuntimeError(f"哈尔滨 embedding-api 图像下载失败：{source_url}，原因：{exc}") from exc
+        return f"/reports/assets/{out_path.name}"
+
+    def _build_charts(
+        self,
+        request: ReportRequest,
+        task_id: str,
+        task_display: str,
+        patch_id: str,
+        system_result: dict[str, Any],
+        embedding_asset_url: str,
+    ) -> list[ChartAsset]:
+        charts: list[ChartAsset] = []
+        if task_id in STATIC_TASKS:
+            static_url = (
+                f"/regions/harbin/patches/{patch_id}/tasks/{task_id}/result?"
+                f"{urlencode({'format': 'png', 'version': 'v1'})}"
+            )
+            charts.append(
+                ChartAsset(
+                    title=f"{task_display}专题结果",
+                    kind="image",
+                    url=self._copy_remote_asset(static_url, request, task_id, "static_result"),
+                    caption="哈尔滨 embedding-api 预生成专题结果，适合做稳定报告展示和业务解读。",
+                )
+            )
+        if system_result.get("result_url"):
+            charts.append(
+                ChartAsset(
+                    title=f"{task_display}实时推理结果",
+                    kind="image",
+                    url=self._copy_remote_asset(system_result["result_url"], request, task_id, "system_result"),
+                    caption="系统预训练模型基于指定月份 embedding 生成的 patch 级实时推理结果。",
+                )
+            )
+        charts.append(
+            ChartAsset(
+                title="Embedding 可视化预览",
+                kind="image",
+                url=embedding_asset_url,
+                caption="将高维 embedding 映射为 RGB 预览图，用于辅助观察 patch 表征差异。",
+            )
+        )
+        return charts
+
+    def _build_metrics(
+        self,
+        request: ReportRequest,
+        task_display: str,
+        task_id: str,
+        patch: dict[str, Any],
+        class_names: list[str],
+        task_summary: dict[str, Any],
+    ) -> list[MetricCard]:
+        bounds = patch.get("bounds_wgs84") or []
+        bounds_text = "暂无"
+        if len(bounds) == 4:
+            bounds_text = f"{bounds[0]:.4f},{bounds[1]:.4f} - {bounds[2]:.4f},{bounds[3]:.4f}"
+        cards = [
+            MetricCard("任务", task_display, "Agent 识别后的哈尔滨专题任务"),
+            MetricCard("地区", "哈尔滨新区", "哈尔滨 embedding-api 区域标识 harbin"),
+            MetricCard("时间", request.time_range, "用户指定的分析月份"),
+            MetricCard("接口模式", self._task_mode(task_id), "当前专题使用的哈尔滨 API 能力"),
+            MetricCard("Patch", str(patch.get("patch_id") or "暂无"), "临时 patch 选择器命中的样本"),
+            MetricCard("可用月份", str(len(patch.get("available_months") or [])), "当前 patch 可查询的 embedding 月份数"),
+            MetricCard("经纬度范围", bounds_text, "当前 patch 的 WGS84 边界"),
+        ]
+        if class_names:
+            cards.append(MetricCard("可用类别", str(len(class_names)), "系统模型返回的类别数量"))
+        if task_summary:
+            cards.extend(
+                [
+                    MetricCard("统计 Patch", str(task_summary.get("total_patches") or "暂无"), "专题结果覆盖的 patch 数"),
+                    MetricCard("正样本 Patch", str(task_summary.get("positive_patches") or "暂无"), "专题结果中包含目标对象的 patch 数"),
+                ]
+            )
+        return cards
+
+    def _summary_text(self, request: ReportRequest, task_id: str, patch: dict[str, Any], class_names: list[str]) -> str:
+        task_display = TASK_DISPLAY.get(task_id, request.task)
+        if task_id == "building_extraction":
+            return (
+                f"本次调用哈尔滨新区 embedding-api，对 {request.time_range} 的 {patch.get('patch_id')} "
+                "执行建筑物提取。报告同时使用预生成建筑物专题结果和系统模型实时推理图，"
+                "适合观察建设区、工地和高密度人工地表。"
+            )
+        if task_id == "land_use_classification":
+            return (
+                f"本次调用哈尔滨新区 embedding-api，对 {request.time_range} 的 {patch.get('patch_id')} "
+                "执行土地利用分类。报告使用预生成土地利用专题结果，适合分析耕地、建设用地等用地结构。"
+            )
+        class_text = "、".join(class_names[:5]) if class_names else "Non-water、Water"
+        return (
+            f"本次调用哈尔滨新区 embedding-api，对 {request.time_range} 的 {patch.get('patch_id')} "
+            f"执行水体提取。系统模型返回了可视化推理结果，并提供 {class_text} 等类别定义，"
+            "适合观察松花江水系、湿地和水陆边界。"
+        )
+
+    def _build_findings(
+        self,
+        request: ReportRequest,
+        task_id: str,
+        patch: dict[str, Any],
+        class_names: list[str],
+        task_summary: dict[str, Any],
+    ) -> list[str]:
+        task_display = TASK_DISPLAY.get(task_id, request.task)
+        findings = [
+            f"哈尔滨新区 {request.time_range} 的 {task_display} 请求已成功路由到区域 embedding-api。",
+            f"当前 patch 为 {patch.get('patch_id')}，可用月份包括 {', '.join((patch.get('available_months') or [])[:10])}。",
+        ]
+        if task_id == "water_extraction":
+            findings.append("水体提取结果适合观察河道、湖泊、湿地及水陆边界的空间连续性。")
+        elif task_id == "building_extraction":
+            findings.append("建筑物提取结果适合观察城市建设区、工地和高密度人工地表的分布。")
+        else:
+            findings.append("土地利用分类结果适合观察耕地、建设用地及其他用地结构的空间差异。")
+        if class_names:
+            findings.append(f"系统模型类别定义已同步，前端可据此绘制图例：{', '.join(class_names[:8])}。")
+        if task_summary:
+            findings.append(
+                f"专题统计显示该任务覆盖 {task_summary.get('total_patches', '暂无')} 个 patch，"
+                f"其中正样本 patch 为 {task_summary.get('positive_patches', '暂无')} 个。"
+            )
+        return findings
+
+    def _build_recommendations(self, task_id: str) -> list[str]:
+        common = [
+            "后续应把区域选择替换为 AOI 到 patch 的空间检索，并对多个 patch 做汇总统计。",
+            "前端展示时建议同时呈现 embedding 预览和模型结果图，便于解释模型输入表征与输出之间的关系。",
+        ]
+        if task_id == "water_extraction":
+            return ["水体边界建议结合多月份结果复核，区分季节性水位变化与稳定水面。", *common]
+        if task_id == "building_extraction":
+            return ["建筑物结果建议叠加道路、地块或施工区域边界，提升城市更新场景解释力。", *common]
+        return ["土地利用分类建议结合多月份结果和建设用地边界，识别耕地、建设用地等结构变化。", *common]
+
+    def _build_narratives(self, request: ReportRequest, task_id: str, patch: dict[str, Any]) -> list[dict[str, str]]:
+        return [
+            {
+                "title": "区域 API 接入",
+                "text": f"Agent 已识别哈尔滨新区请求，并调用 {self.config.base_url} 完成 {task_id} 专题分析。",
+            },
+            {
+                "title": "Patch 选择",
+                "text": f"当前采用确定性临时策略选择 {patch.get('patch_id')}，保证相同地区、任务和月份会复用同一个样本，便于联调复现。",
+            },
+        ]
+
+    def _build_risks(self, task_id: str) -> list[str]:
+        if task_id == "water_extraction":
+            return ["当前为单 patch 结果，不能直接代表整个哈尔滨新区水体面积变化。"]
+        if task_id == "building_extraction":
+            return ["建筑物提取容易受阴影、工地裸土和密集纹理影响，正式报告需要结合置信度或人工抽检。"]
+        return ["土地利用分类在用地边界和混合像元区域可能不稳定，建议后续补充多 patch 汇总和人工核验。"]
+
+    def _task_mode(self, task_id: str) -> str:
+        if task_id == "building_extraction":
+            return "预生成专题 + 实时推理"
+        if task_id == "land_use_classification":
+            return "预生成专题"
+        return "实时推理"
+
+    def _fingerprint(self, task_id: str, patch_id: str, month: str, result: dict[str, Any]) -> str:
+        raw = json.dumps(
+            {"task": task_id, "patch": patch_id, "month": month, "version": self.config.version, "result": result},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
