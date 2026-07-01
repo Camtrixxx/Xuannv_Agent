@@ -99,6 +99,11 @@ def test_followup_question_detected():
     assert intent.is_complete  # follow-up needs no slots
 
 
+def test_rewrite_request_detected_as_followup():
+    for prompt in ("给我一份精简版", "用通俗的话重写一下", "这部分再展开详细点", "总结一下"):
+        assert _intent(prompt).message_type == MessageType.FOLLOW_UP, prompt
+
+
 def test_detailed_request_with_new_task_is_not_followup():
     # Naming a concrete task + month means a (new) report, not a discussion.
     intent = _intent("详细分析雅江区域2025年9月的水体分布")

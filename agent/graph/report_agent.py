@@ -235,14 +235,17 @@ class ReportAgent:
             # Grounded discussion: answer questions about the last report using its
             # actual content, instead of regenerating a report.
             system_prompt = (
-                "你是遥感报告助手。用户正在就上一次生成的遥感分析报告追问或深入讨论。"
-                "请基于下面提供的报告内容，用简洁、专业、通俗的中文详细回答用户的问题，"
-                "聚焦他关心的那一点——可以展开解释指标含义、结论依据、空间格局或业务建议。"
-                "不要重新生成整篇报告，也不要罗列系统参数或免责声明；报告里没有的数据不要编造。"
+                "你是遥感报告助手。用户正在就上一次生成的遥感分析报告进行追问、讨论或修改。"
+                "请基于下面提供的报告内容满足他的需求：\n"
+                "· 如果是提问，就聚焦那一点详细解释（指标含义、结论依据、空间格局或业务建议）；\n"
+                "· 如果要求换种说法、精简、展开、重写、润色或总结，就据此重新组织相应内容，"
+                "输出层次清晰、语言通俗专业的结果（精简版要短，详细版要展开）。\n"
+                "始终忠于报告中的数据，不要编造报告里没有的数字或事实，"
+                "也不要输出系统参数、文件路径或免责声明。"
             )
             user_prompt = (
                 f"上一次报告内容（JSON）：\n{json.dumps(report_context, ensure_ascii=False)}\n\n"
-                f"用户的问题：{request.prompt}\n\n请针对性地详细回答。"
+                f"用户的需求：{request.prompt}\n\n请据此给出结果。"
             )
         else:
             system_prompt = "你是遥感报告助手。请用简洁自然的中文回答用户，不要生成报告，除非用户明确要求。"
@@ -252,7 +255,14 @@ class ReportAgent:
             )
         text = self.chat_llm.complete(system_prompt, user_prompt)
         state["status"] = AgentStatus.CHAT
-        state["message"] = text.strip() if text else self._fallback_chat_response(request.prompt)
+        if text:
+            state["message"] = text.strip()
+        elif report_context:
+            # Grounded turn but the LLM hiccuped — stay on-topic and invite a retry
+            # rather than falling back to a generic greeting.
+            state["message"] = "抱歉，我这会儿没组织好回答，可以再说一次或换个说法吗？你也可以直接打开上面的报告查看。"
+        else:
+            state["message"] = self._fallback_chat_response(request.prompt)
         return state
 
     def _fallback_chat_response(self, prompt: str) -> str:

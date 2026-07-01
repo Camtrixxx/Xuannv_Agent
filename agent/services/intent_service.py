@@ -114,7 +114,8 @@ class IntentService:
                 "要求": {
                     "message_type": "report_request / slot_fill / free_chat / change_context / confirmation / follow_up 之一；"
                     "日常闲聊、问候、常识/时间/天气等无关问题一律 free_chat；"
-                    "对上一次已生成报告结果的追问、解释、深入讨论（未指定新的任务或月份）用 follow_up",
+                    "对上一次已生成报告结果的追问、解释、深入讨论，或要求换种说法/精简/展开/重写/总结"
+                    "（未指定新的任务或月份）用 follow_up",
                     "task": "只有用户文本明确提到或前端已选择时才填写，且必须是支持任务之一；否则返回空字符串，绝不猜测",
                     "region": "必须是支持地区之一，优先使用前端选择，除非用户文本明确改写",
                     "time_range": "YYYY-MM 格式；如果用户没有明确月份，返回空字符串",
@@ -243,10 +244,15 @@ class IntentService:
         # A question that asks to explain/expand on existing results (and does not
         # name a new task or month) is a follow-up discussion, not a new report.
         followup_cues = [
+            # 提问 / 解释
             "详细", "详解", "讲讲", "讲解", "解释", "展开", "为什么", "为何",
             "怎么理解", "如何理解", "什么意思", "啥意思", "具体说", "具体讲",
             "说说", "解读", "没看懂", "看不懂", "这个结论", "这一点", "这部分",
             "上面", "刚才", "刚刚", "报告里", "这份报告", "那份报告", "怎么得出", "依据",
+            # 改写 / 微调 / 重组
+            "重写", "改写", "重新写", "再写", "润色", "精简", "精简版", "简版",
+            "简洁", "简短", "缩短", "浓缩", "通俗", "白话", "口语", "换个说法",
+            "换种说法", "换个角度", "重新组织", "总结一下", "概括", "简单点", "详细点",
         ]
         if (
             message_type == MessageType.REPORT_REQUEST
