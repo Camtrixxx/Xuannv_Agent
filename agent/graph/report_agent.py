@@ -8,6 +8,7 @@ from agent.services.analysis_service import MockAnalysisService
 from agent.services.intent_service import IntentService
 from agent.services.llm_provider import DeepSeekProvider, LLMProvider
 from agent.services.memory_service import MemoryService
+from agent.services.region_availability import is_month_available, unavailable_message
 from agent.services.regional_analysis_service import RegionalAnalysisService
 from agent.services.report_service import ReportService
 
@@ -172,6 +173,17 @@ class ReportAgent:
             state["status"] = AgentStatus.NEEDS_INPUT
             state["message"] = self._clarify_message(missing)
             return state
+
+        # Pre-validate the month against the region's real coverage so an
+        # unavailable month becomes a friendly clarification instead of a raw
+        # upstream error. The bad month is forgotten so the user can re-supply.
+        if not is_month_available(intent.region, intent.time_range):
+            state["message"] = unavailable_message(intent.region, intent.time_range)
+            intent.time_range = ""
+            intent.missing_fields = ["time_range"]
+            state["status"] = AgentStatus.NEEDS_INPUT
+            return state
+
         state["status"] = AgentStatus.OK
         state["message"] = "已完成意图解析，准备执行遥感分析。"
         return state
@@ -201,9 +213,11 @@ class ReportAgent:
 
     def _ask_clarification(self, state: ReportAgentState) -> ReportAgentState:
         state["status"] = AgentStatus.NEEDS_INPUT
-        intent = state.get("intent")
-        missing = intent.missing_fields if intent else ["time_range"]
-        state["message"] = self._clarify_message(missing)
+        # merge_memory already set the right prompt (missing-slot or unavailable-month).
+        if not state.get("message"):
+            intent = state.get("intent")
+            missing = intent.missing_fields if intent else ["time_range"]
+            state["message"] = self._clarify_message(missing)
         return state
 
     def _chat_response(self, state: ReportAgentState) -> ReportAgentState:
@@ -246,10 +260,22 @@ class ReportAgent:
             aoi=state["request"].aoi,
         )
         state["request"] = normalized_request
-        state["analysis"] = self.analysis_service.analyze(normalized_request)
+        try:
+            state["analysis"] = self.analysis_service.analyze(normalized_request)
+        except Exception as exc:  # Upstream/model failure — degrade to a friendly reply.
+            state["analysis"] = None
+            state["status"] = AgentStatus.NEEDS_INPUT
+            state["message"] = (
+                "抱歉，这次分析没能完成（可能是该月份数据暂不可用或模型服务繁忙）。"
+                "你可以换个月份或任务再试一次。"
+            )
+            state.setdefault("debug", {})["analysis_error"] = str(exc)
         return state
 
     def _generate_report(self, state: ReportAgentState) -> ReportAgentState:
+        if state.get("analysis") is None:
+            # Analysis failed upstream; keep the friendly message set there.
+            return state
         state["report"] = self.report_service.build(state["request"], state["analysis"])
         state["message"] = "报告已生成。"
         state["status"] = AgentStatus.OK

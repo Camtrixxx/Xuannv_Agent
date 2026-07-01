@@ -13,6 +13,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 from agent.config import EmbeddingAPIConfig, ReportConfig
 from agent.schemas.report import AnalysisResult, ChartAsset, MetricCard, ReportRequest
 from agent.services.common import bbox_intersection_score
+from agent.services.region_availability import HARBIN_MONTHS
 
 
 TASK_TO_HARBIN = {
@@ -34,19 +35,6 @@ TASK_DISPLAY = {
 
 STATIC_TASKS = {"building_extraction", "land_use_classification"}
 SYSTEM_MODEL_TASKS = {"building_extraction", "water_extraction"}
-
-HARBIN_MONTHS = [
-    "2025-04",
-    "2025-06",
-    "2025-08",
-    "2025-09",
-    "2025-10",
-    "2026-01",
-    "2026-02",
-    "2026-03",
-    "2026-04",
-    "2026-05",
-]
 
 
 def _stable_pick(items: list[dict[str, Any]], key: str, count: int) -> list[dict[str, Any]]:
