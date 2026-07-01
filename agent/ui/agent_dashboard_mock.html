@@ -1694,7 +1694,7 @@
         <button class="patch-item ${index === 0 ? "active" : ""}" data-patch-id="${escapeHtml(patch.patch_id)}" type="button">
           <strong>${escapeHtml(patch.patch_id)}</strong>
           <span>重叠分数：${escapeHtml(String(patch.score ?? "暂无"))}</span>
-          <span>月份：${escapeHtml((patch.available_months || []).slice(0, 5).join(", "))}</span>
+          <span>月份：${escapeHtml((patch.available_months || []).join(", ") || "暂无")}</span>
           <span>任务：${escapeHtml((patch.available_tasks || []).join(", ") || "实时推理")}</span>
         </button>
       `).join("");

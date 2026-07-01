@@ -319,7 +319,7 @@ absolute_image_url = AGENT_BASE_URL + response.analysis.charts[0].url
     {
       "patch_id": "patch_000002",
       "bounds_wgs84": [126.549189, 45.744418, 126.565129, 45.75628],
-      "available_months": ["2025-04", "2025-06", "2025-09"],
+      "available_months": ["2025-04", "2025-06", "2025-08", "2025-09", "2025-10", "2026-01", "2026-02", "2026-03", "2026-04", "2026-05"],
       "available_tasks": ["land_use_classification", "building_extraction"],
       "score": 1.0
     }
