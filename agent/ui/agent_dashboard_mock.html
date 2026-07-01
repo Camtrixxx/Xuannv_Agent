@@ -1093,7 +1093,7 @@
           <section class="chat">
             <div class="intro">
               <h1>一句话生成遥感分析报告</h1>
-              <p>先选择任务标签和区域，再用自然语言补充月份或继续对话。</p>
+              <p>直接用自然语言说出你的需求即可；想生成报告时，也可以顺手选择任务标签和地图区域。</p>
               <div class="memory-strip" id="memoryStrip">
                 <span>会话：新建</span>
                 <span>状态：等待输入</span>
@@ -1101,7 +1101,7 @@
             </div>
 
             <div class="messages" id="messages">
-              <div class="msg agent">请选择任务类型和地图区域，然后输入你的需求。我会把结果直接返回在这里。</div>
+              <div class="msg agent">你好，我是遥感报告助手 👋 直接告诉我你想分析什么就行，比如“雅江区域去年九月的水体分布”。也可以先问我能做什么。</div>
             </div>
           </section>
         </main>
@@ -1185,7 +1185,7 @@
     src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
   ></script>
   <script>
-    let currentTask = "地物分类";
+    let currentTask = "";
     let currentRegion = "雅江区域";
     let sessionId = (() => {
       const existing = localStorage.getItem("yajiang_agent_session_id");
@@ -1268,7 +1268,7 @@
       localStorage.setItem("yajiang_agent_session_id", sessionId);
     }
 
-    function renderInitialMessage(text = "请选择任务类型和地图区域，然后输入你的需求。我会把结果直接返回在这里。") {
+    function renderInitialMessage(text = "你好，我是遥感报告助手 👋 直接告诉我你想分析什么就行，比如“雅江区域去年九月的水体分布”。也可以先问我能做什么。") {
       messages.innerHTML = `<div class="msg agent">${escapeHtml(text)}</div>`;
     }
 
@@ -1283,7 +1283,8 @@
         taskTags.innerHTML = '<button class="tag" type="button" disabled>专题任务待接入</button>';
         return;
       }
-      currentTask = tasks.includes(preferredTask) ? preferredTask : (tasks.includes(currentTask) ? currentTask : tasks[0]);
+      // Never auto-select a task: keep it empty until the user picks or names one.
+      currentTask = tasks.includes(preferredTask) ? preferredTask : (tasks.includes(currentTask) ? currentTask : "");
       taskTags.innerHTML = tasks.map((task) => `
         <button class="tag ${task === currentTask ? "active" : ""}" data-task="${escapeHtml(task)}" type="button">${escapeHtml(task)}</button>
       `).join("");
@@ -1465,7 +1466,7 @@
     async function newSession() {
       setSessionId(createSessionId());
       closePreview();
-      renderInitialMessage("新会话已创建。请选择任务类型和地图区域，然后输入你的需求。");
+      renderInitialMessage("新会话已创建。直接说出你想分析什么就行，比如“哈尔滨新区上个月的建筑物提取”。");
       updateMemoryStrip({status: "idle", session_id: sessionId, memory: {pending_slots: [], reports: []}});
       await refreshSessions();
       document.getElementById("prompt").focus();
@@ -1935,12 +1936,8 @@
       if (!prompt) {
         return;
       }
-      if (!currentTask) {
-        addMessage("当前区域的专题任务还没有接入，请先选择雅江区域、哈尔滨新区或北京市海淀区。", "agent");
-        return;
-      }
       sendButton.disabled = true;
-      addMessage(prompt || `生成${currentRegion}${currentTask}报告`, "user");
+      addMessage(prompt, "user");
       addMessage("正在理解你的意图并更新会话状态。", "agent");
       try {
         const requestRegion = selectedPatchIds.length && selectedPatchRegion ? selectedPatchRegion : currentRegion;
@@ -1995,7 +1992,7 @@
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify({session_id: sessionId})
       });
-      messages.innerHTML = '<div class="msg agent">会话已清空。请选择任务类型和地图区域，然后继续输入需求。</div>';
+      messages.innerHTML = '<div class="msg agent">会话已清空。直接说出你想分析什么就行，也可以先和我聊聊。</div>';
       updateMemoryStrip({status: "idle", session_id: sessionId, memory: {pending_slots: []}});
       closePreview();
       refreshSessions();
@@ -2014,7 +2011,8 @@
       if (!tag || tag.disabled || !tag.dataset.task) {
         return;
       }
-      currentTask = tag.dataset.task;
+      // Toggle: click the active tag again to deselect it.
+      currentTask = currentTask === tag.dataset.task ? "" : tag.dataset.task;
       renderTaskTags(currentTask);
       clearPatchSelection();
       updateMapLabel();

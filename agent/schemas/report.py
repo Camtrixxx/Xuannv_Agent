@@ -46,7 +46,7 @@ class ReportRequest:
         prompt = str(payload.get("prompt") or "生成一份遥感分析报告")
         raw_time_range = str(payload.get("time_range") or "").strip()
         return cls(
-            task=str(payload.get("task") or "地物分类"),
+            task=str(payload.get("task") or ""),
             region=str(payload.get("region") or "雅江区域"),
             prompt=prompt,
             time_range=raw_time_range,

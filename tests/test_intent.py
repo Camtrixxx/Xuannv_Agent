@@ -49,8 +49,9 @@ def test_infer_no_month_returns_empty():
 
 
 def _intent(prompt: str, **kwargs):
+    # Mirrors the frontend default: no task pre-selected, region from the map.
     service = IntentService(llm=_NullLLM(), today=TODAY)
-    request = ReportRequest(task=kwargs.get("task", "地物分类"), region=kwargs.get("region", "雅江区域"), prompt=prompt)
+    request = ReportRequest(task=kwargs.get("task", ""), region=kwargs.get("region", "雅江区域"), prompt=prompt)
     return service.parse(request)
 
 
@@ -66,6 +67,20 @@ def test_report_request_without_month_flags_missing():
     assert intent.time_range == ""
     assert "time_range" in intent.missing_fields
     assert not intent.is_complete
+
+
+def test_report_without_task_flags_task_missing():
+    # No task is ever silently defaulted; the agent must ask which task.
+    intent = _intent("帮我生成一份报告")
+    assert intent.task == ""
+    assert "task" in intent.missing_fields
+    assert not intent.is_complete
+
+
+def test_task_named_in_prompt_is_not_missing():
+    intent = _intent("雅江区域的水体分布")
+    assert intent.task == "水体分布"
+    assert "task" not in intent.missing_fields
 
 
 def test_capability_question_is_free_chat():

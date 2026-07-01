@@ -145,39 +145,32 @@ class ReportAgent:
             state["message"] = ""
             return state
 
-        if intent.message_type == MessageType.CONFIRMATION and "time_range" in pending and previous.get("time_range"):
-            intent.task = previous.get("task") or intent.task or "地物分类"
-            intent.region = previous.get("region") or intent.region or "雅江区域"
-            intent.time_range = previous.get("time_range") or ""
-            intent.missing_fields = []
-            intent.confirmation_fields = []
+        # Follow-ups (slot fills, confirmations, "换个任务", or any turn with prior
+        # context) inherit the earlier report slots so the user only supplies what's
+        # still missing. Historical task/month are reused silently — no default is ever
+        # invented, so an unspecified task stays empty and gets asked for.
+        inherits_context = (
+            intent.message_type in {MessageType.SLOT_FILL, MessageType.CONFIRMATION, MessageType.CHANGE_CONTEXT}
+            or bool(pending)
+            or bool(previous)
+        )
+        if inherits_context:
+            if not intent.task and previous.get("task"):
+                intent.task = previous.get("task")
+            if not intent.time_range and previous.get("time_range"):
+                intent.time_range = previous.get("time_range")
 
-        if intent.message_type == MessageType.SLOT_FILL or (pending and intent.time_range):
-            intent.message_type = MessageType.SLOT_FILL
-            intent.task = previous.get("task") or intent.task or "地物分类"
-            intent.region = previous.get("region") or intent.region or "雅江区域"
-            if not intent.time_range:
-                intent.time_range = previous.get("time_range") or ""
-            intent.missing_fields = [slot for slot in pending if not getattr(intent, slot, "")]
+        missing = []
+        if not intent.task:
+            missing.append("task")
+        if not intent.time_range:
+            missing.append("time_range")
+        intent.missing_fields = missing
+        intent.confirmation_fields = []
 
-        if intent.message_type == MessageType.CHANGE_CONTEXT:
-            intent.task = intent.task or previous.get("task") or "地物分类"
-            intent.region = intent.region or previous.get("region") or "雅江区域"
-            intent.time_range = intent.time_range or previous.get("time_range") or ""
-
-        if intent.time_range:
-            intent.missing_fields = [slot for slot in intent.missing_fields if slot != "time_range"]
-
-        if intent.message_type == MessageType.REPORT_REQUEST and previous and not intent.time_range:
-            previous_time = previous.get("time_range") or ""
-            if previous_time:
-                intent.time_range = previous_time
-                intent.missing_fields = [slot for slot in intent.missing_fields if slot != "time_range"]
-                intent.confirmation_fields = []
-
-        if not intent.is_complete:
+        if missing:
             state["status"] = AgentStatus.NEEDS_INPUT
-            state["message"] = "请在需求里补充要分析的月份，例如：去年十月份、2025年9月。"
+            state["message"] = self._clarify_message(missing)
             return state
         state["status"] = AgentStatus.OK
         state["message"] = "已完成意图解析，准备执行遥感分析。"
@@ -190,9 +183,27 @@ class ReportAgent:
             return AgentRoute.ASK_CLARIFICATION
         return AgentRoute.RUN_ANALYSIS
 
+    def _clarify_message(self, missing: list[str]) -> str:
+        need_task = "task" in missing
+        need_month = "time_range" in missing
+        if need_task and need_month:
+            return (
+                "好的，帮你生成报告～ 想分析什么呢？可以点上方的任务标签，"
+                "或直接告诉我，比如“水体分布”“建筑物提取”“地物分类”；"
+                "另外还想看哪个月份？例如：去年九月、2025年9月。"
+            )
+        if need_task:
+            return (
+                "想分析什么呢？可以点上方的任务标签，或直接告诉我，"
+                "比如“水体分布”“建筑物提取”“地物分类”“高程地形”。"
+            )
+        return "请补充要分析的月份，例如：去年十月、2025年9月。"
+
     def _ask_clarification(self, state: ReportAgentState) -> ReportAgentState:
         state["status"] = AgentStatus.NEEDS_INPUT
-        state["message"] = "请在需求里补充要分析的月份，例如：去年十月份、2025年9月。"
+        intent = state.get("intent")
+        missing = intent.missing_fields if intent else ["time_range"]
+        state["message"] = self._clarify_message(missing)
         return state
 
     def _chat_response(self, state: ReportAgentState) -> ReportAgentState:

@@ -112,11 +112,11 @@ class IntentService:
                 "支持地区": SUPPORTED_REGIONS,
                 "当前日期": (self.today or date.today()).isoformat(),
                 "要求": {
-                    "message_type": "report_request / slot_fill / free_chat / change_context / confirmation 之一",
-                    "task": "必须是支持任务之一，优先使用前端选择，除非用户文本明确改写",
+                    "message_type": "report_request / slot_fill / free_chat / change_context / confirmation 之一；日常闲聊、问候、常识/时间/天气等无关问题一律 free_chat",
+                    "task": "只有用户文本明确提到或前端已选择时才填写，且必须是支持任务之一；否则返回空字符串，绝不猜测",
                     "region": "必须是支持地区之一，优先使用前端选择，除非用户文本明确改写",
                     "time_range": "YYYY-MM 格式；如果用户没有明确月份，返回空字符串",
-                    "missing_fields": "缺少的字段名列表；缺月份时包含 time_range",
+                    "missing_fields": "报告请求缺少的字段名列表；缺任务时包含 task，缺月份时包含 time_range",
                     "confirmation_fields": "需要用户确认的字段名列表；通常为空",
                     "confidence": "0 到 1 的数字",
                 },
@@ -214,29 +214,40 @@ class IntentService:
         if request.time_range and re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", request.time_range):
             message_type = MessageType.SLOT_FILL
 
-        task = request.task if request.task in SUPPORTED_TASKS else "地物分类"
-        region = request.region if request.region in SUPPORTED_REGIONS else "雅江区域"
+        # Task is never silently defaulted — an empty task means "ask the user".
+        task = request.task if request.task in SUPPORTED_TASKS else ""
+        task_in_prompt = False
         for candidate in SUPPORTED_TASKS:
             if candidate in prompt:
                 task = candidate
+                task_in_prompt = True
         for key, candidate in TASK_ALIASES.items():
             if key in prompt:
                 task = candidate
+                task_in_prompt = True
+        region = request.region if request.region in SUPPORTED_REGIONS else "雅江区域"
+        region_in_prompt = False
         for candidate in SUPPORTED_REGIONS:
             if candidate in prompt:
                 region = candidate
+                region_in_prompt = True
         for key, candidate in REGION_ALIASES.items():
             if key in prompt:
                 region = candidate
+                region_in_prompt = True
         time_range = request.time_range or infer_time_range(prompt, today=self.today)
         if time_range and message_type == MessageType.REPORT_REQUEST and len(prompt) <= 12:
             message_type = MessageType.SLOT_FILL
-        if time_range and any(key in prompt for key in ["去年", "今年", "明年", "月", "上月", "本月"]):
-            confidence = 0.84
-        elif message_type in {MessageType.FREE_CHAT, MessageType.CHANGE_CONTEXT, MessageType.CONFIRMATION}:
+        has_report_content = task_in_prompt or region_in_prompt or "报告" in prompt or "专题" in prompt
+        if message_type in {MessageType.FREE_CHAT, MessageType.CHANGE_CONTEXT, MessageType.CONFIRMATION}:
             confidence = 0.82
+        elif has_report_content and (time_range or task_in_prompt):
+            # Genuine report request — real report content is present.
+            confidence = 0.84
         else:
-            confidence = 0.58
+            # Ambiguous (e.g. chit-chat, or "报告" with nothing else). Let the LLM
+            # decide chat-vs-report when a key is configured; degrade to rules otherwise.
+            confidence = 0.5
         return AgentIntent(
             message_type=message_type,
             task=task,
@@ -250,10 +261,11 @@ class IntentService:
     def _validate(self, intent: AgentIntent) -> AgentIntent:
         missing = set(intent.missing_fields)
         confirmation = set(intent.confirmation_fields)
-        if intent.task not in SUPPORTED_TASKS:
-            intent.task = "地物分类"
+        # Region keeps a sensible default; task is never silently defaulted.
         if intent.region not in SUPPORTED_REGIONS:
             intent.region = "雅江区域"
+        if intent.task not in SUPPORTED_TASKS:
+            intent.task = ""
         if intent.message_type not in {
             MessageType.REPORT_REQUEST,
             MessageType.SLOT_FILL,
@@ -266,6 +278,7 @@ class IntentService:
             intent.missing_fields = []
             intent.confirmation_fields = []
             return intent
+        # Month slot.
         if not re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", intent.time_range):
             intent.time_range = ""
             if intent.message_type != MessageType.CONFIRMATION:
@@ -273,10 +286,16 @@ class IntentService:
         else:
             missing.discard("time_range")
             confirmation.discard("time_range")
+        # Task slot — required for report intents; filled from memory on confirmation/slot-fill.
+        if intent.task:
+            missing.discard("task")
+        elif intent.message_type != MessageType.CONFIRMATION:
+            missing.add("task")
         if intent.message_type == MessageType.CHANGE_CONTEXT and intent.time_range:
             missing.discard("time_range")
         if intent.message_type == MessageType.CONFIRMATION:
             missing.discard("time_range")
+            missing.discard("task")
         intent.missing_fields = sorted(missing)
         intent.confirmation_fields = sorted(confirmation)
         return intent
