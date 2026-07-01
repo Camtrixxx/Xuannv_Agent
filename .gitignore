@@ -23,6 +23,7 @@ Thumbs.db
 # Runtime outputs
 agent/reports/
 agent/runtime/
+downloads/
 *.log
 
 # Data / model artifacts
