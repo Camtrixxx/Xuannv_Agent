@@ -429,62 +429,137 @@ WORKFLOW_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>遥感报告 Agent 节点编排</title>
+  <title>遥感报告助手 · 工作原理</title>
   <style>
-    body { margin: 0; background: #eef2f5; color: #1f2937; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }
-    main { max-width: 1120px; margin: 0 auto; padding: 34px 20px 58px; }
-    h1 { margin: 0 0 10px; font-size: 32px; }
-    .lead { color: #4b5563; line-height: 1.8; margin-bottom: 20px; }
-    .flow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; align-items: stretch; }
-    .node { background: #fff; border: 1px solid #dbe3ea; border-radius: 8px; padding: 16px; position: relative; min-height: 186px; }
-    .node h2 { margin: 0 0 8px; font-size: 17px; }
-    .node p, li { line-height: 1.7; color: #4b5563; font-size: 14px; }
-    .node strong { color: #111827; }
-    .badge { display: inline-block; margin-bottom: 10px; color: #2563eb; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 999px; padding: 4px 9px; font-size: 12px; font-weight: 700; }
-    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 18px; }
-    section { background: #fff; border: 1px solid #dbe3ea; border-radius: 8px; padding: 18px; }
-    pre { white-space: pre-wrap; background: #0f172a; color: #e5e7eb; padding: 14px; border-radius: 8px; overflow: auto; }
-    @media (max-width: 980px) { .flow, .split { grid-template-columns: 1fr; } }
+    :root {
+      --bg: #f6f7f9; --card: #ffffff; --text: #1f2328; --muted: #6b7280;
+      --line: #e5e7eb; --primary: #2563eb; --primary-soft: #eef4ff; --green: #16a34a;
+      --shadow: 0 18px 45px rgba(15, 23, 42, 0.1);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; color: var(--text);
+      background: radial-gradient(1200px 600px at 100% -10%, #e8eefc 0%, rgba(232,238,252,0) 55%), var(--bg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+    main { max-width: 1080px; margin: 0 auto; padding: 30px 20px 64px; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 26px; }
+    .brand { font-weight: 800; font-size: 18px; letter-spacing: .2px; }
+    .brand small { color: var(--muted); font-weight: 600; margin-left: 8px; font-size: 13px; }
+    .back { color: var(--primary); text-decoration: none; font-weight: 700; font-size: 14px; }
+    .back:hover { text-decoration: underline; }
+    .hero { text-align: center; margin: 8px 0 34px; }
+    .hero .eyebrow { color: var(--primary); font-weight: 800; font-size: 13px; letter-spacing: .6px; }
+    .hero h1 { margin: 12px 0 12px; font-size: 34px; line-height: 1.25; }
+    .hero p { max-width: 640px; margin: 0 auto; color: var(--muted); line-height: 1.9; font-size: 16px; }
+    h2.section { font-size: 20px; margin: 40px 0 16px; }
+    .steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+    .step {
+      background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 16px;
+      box-shadow: var(--shadow); position: relative; min-height: 178px;
+    }
+    .step .n {
+      display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px;
+      border-radius: 999px; background: var(--primary-soft); color: var(--primary); font-weight: 800; font-size: 13px;
+    }
+    .step .ico { font-size: 26px; margin: 12px 0 8px; }
+    .step h3 { margin: 0 0 6px; font-size: 15px; }
+    .step p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.7; }
+    .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px; box-shadow: var(--shadow); }
+    .card h3 { margin: 0 0 4px; font-size: 17px; }
+    .card .region-note { color: var(--muted); font-size: 12.5px; margin: 0 0 14px; }
+    .tags { display: flex; flex-wrap: wrap; gap: 8px; }
+    .tag { background: var(--primary-soft); color: var(--primary); border-radius: 999px; padding: 5px 11px; font-size: 13px; font-weight: 600; }
+    .examples { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .ex {
+      background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px;
+      color: var(--text); line-height: 1.6; box-shadow: var(--shadow); position: relative;
+    }
+    .ex::before { content: "“"; position: absolute; top: 2px; left: 10px; font-size: 34px; color: #cbd5e1; }
+    .ex span { display: block; padding-left: 18px; }
+    .deliver { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 22px 24px; box-shadow: var(--shadow); }
+    .deliver ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 12px 26px; }
+    .deliver li { position: relative; padding-left: 30px; line-height: 1.7; color: var(--text); }
+    .deliver li::before {
+      content: "✓"; position: absolute; left: 0; top: 1px; width: 20px; height: 20px; border-radius: 999px;
+      background: rgba(22,163,74,.12); color: var(--green); font-weight: 800; font-size: 12px;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .footer { margin-top: 44px; text-align: center; color: var(--muted); font-size: 13px; line-height: 1.9; }
+    .footer a { color: var(--muted); text-decoration: underline; }
+    @media (max-width: 900px) {
+      .steps { grid-template-columns: repeat(2, 1fr); }
+      .cards, .examples { grid-template-columns: 1fr; }
+      .deliver ul { grid-template-columns: 1fr; }
+      .hero h1 { font-size: 28px; }
+    }
   </style>
 </head>
 <body>
   <main>
-    <h1>遥感报告 Agent 节点编排</h1>
-    <p class="lead">当前流程支持多轮会话、SQLite 持久记忆、规则优先意图解析、LLM 兜底、真实 AEF 推理服务调用、报告复用与运行产物治理。时间月份仍是报告生成必填字段；若历史月份存在，Agent 会先请求用户确认，不会静默复用。</p>
-    <div class="flow">
-      <article class="node"><span class="badge">Node 1</span><h2>load_memory</h2><p><strong>输入：</strong>session_id、用户消息、前端任务/地区标签。</p><p><strong>职责：</strong>读取 SQLite 会话状态，追加用户消息。</p></article>
-      <article class="node"><span class="badge">Node 2</span><h2>parse_intent</h2><p><strong>服务：</strong>规则优先 + DeepSeek 兜底。</p><p><strong>分类：</strong>report_request / slot_fill / free_chat / change_context。</p></article>
-      <article class="node"><span class="badge">Node 3</span><h2>merge_memory</h2><p><strong>职责：</strong>合并新槽位和历史槽位。</p><p><strong>策略：</strong>历史月份存在但用户未指定时直接沿用，减少二次确认。</p></article>
-      <article class="node"><span class="badge">Node 4</span><h2>route</h2><p><strong>分支：</strong>ask_clarification / chat_response / run_analysis。</p><p><strong>规则：</strong>缺月份且无历史月份时追问，聊天不生成报告。</p></article>
-      <article class="node"><span class="badge">Node 5</span><h2>ask/chat</h2><p><strong>追问：</strong>仅在没有可用月份时补月份。</p><p><strong>聊天：</strong>自然语言回答，不触发报告。</p></article>
-      <article class="node"><span class="badge">Node 6</span><h2>run_analysis</h2><p><strong>输入：</strong>标准化 AEF 调用字段。</p><p><strong>输出：</strong>真实 AEF 指标、图像产物、风险、局限性和专题解读。</p></article>
-      <article class="node"><span class="badge">Node 7</span><h2>generate_report</h2><p><strong>服务：</strong>ReportService + DeepSeek。</p><p><strong>输出：</strong>HTML、Markdown、复用标记和报告记录。</p></article>
-      <article class="node"><span class="badge">Node 8</span><h2>write_memory</h2><p><strong>职责：</strong>写回槽位、状态、摘要、消息和报告索引。</p><p><strong>输出：</strong>下一轮可继续补槽、改任务或聊天。</p></article>
+    <div class="topbar">
+      <div class="brand">遥感报告助手<small>工作原理</small></div>
+      <a class="back" href="/">← 返回助手</a>
     </div>
-    <div class="split">
-      <section>
-        <h2>标准化字段</h2>
-        <pre>{
-  "task": "地物分类",
-  "region": "雅江区域",
-  "time_range": "2025-10",
-  "aoi": {"name": "雅江区域"},
-  "sample_indices": [40],
-  "selector": "frontend_selected_patch",
-  "selected_patch_ids": ["patch_000040"],
-  "outputs": ["metrics", "artifacts", "report_assets"]
-}</pre>
-      </section>
-      <section>
-        <h2>产品原则</h2>
-        <ul>
-          <li>报告生成前必须补齐或确认关键字段。</li>
-          <li>LLM 负责理解和表达，结构化指标由分析服务提供。</li>
-          <li>当前已调用真实 AEF 推理服务，区域到 patch 的映射后续替换为正式 AOI 检索。</li>
-          <li>运行产物进入 agent/reports 和 agent/runtime，不进入 git。</li>
-        </ul>
-      </section>
+
+    <div class="hero">
+      <div class="eyebrow">它是如何工作的</div>
+      <h1>用一句话，生成专业遥感分析报告</h1>
+      <p>你不需要懂任何遥感专业参数。只要用日常语言说出想看的地区、时间和内容，助手会自动理解、分析并为你整理成一份图文并茂的报告。</p>
     </div>
+
+    <h2 class="section">五步，从一句话到一份报告</h2>
+    <div class="steps">
+      <article class="step"><span class="n">1</span><div class="ico">📝</div><h3>描述你的需求</h3><p>用日常语言说清地区、时间和想分析的内容，例如“雅江区域去年九月的水体分布”。</p></article>
+      <article class="step"><span class="n">2</span><div class="ico">🧠</div><h3>智能理解意图</h3><p>助手自动识别出地区、分析任务和时间，无需你填写任何专业参数或表单。</p></article>
+      <article class="step"><span class="n">3</span><div class="ico">💬</div><h3>缺什么补什么</h3><p>如果少了关键信息（比如没说月份），助手会主动追问，你一句话补齐即可。</p></article>
+      <article class="step"><span class="n">4</span><div class="ico">🛰️</div><h3>遥感模型分析</h3><p>调用对应区域的遥感模型完成识别与计算，得到关键指标和结果图。</p></article>
+      <article class="step"><span class="n">5</span><div class="ico">📄</div><h3>一键生成报告</h3><p>自动整理成结构化图文报告，可在线预览，也可下载 HTML 或 Markdown。</p></article>
+    </div>
+
+    <h2 class="section">能帮你分析什么</h2>
+    <div class="cards">
+      <div class="card">
+        <h3>雅江区域</h3>
+        <p class="region-note">高原河谷地区 · 本地遥感模型</p>
+        <div class="tags"><span class="tag">地物分类</span><span class="tag">水体分布</span><span class="tag">高程地形</span></div>
+      </div>
+      <div class="card">
+        <h3>哈尔滨新区</h3>
+        <p class="region-note">城市建设区 · 在线专题服务</p>
+        <div class="tags"><span class="tag">建筑物提取</span><span class="tag">土地利用分类</span><span class="tag">水体提取</span></div>
+      </div>
+      <div class="card">
+        <h3>北京市海淀区</h3>
+        <p class="region-note">城市核心区 · 在线专题服务</p>
+        <div class="tags"><span class="tag">建筑物提取</span><span class="tag">道路提取</span><span class="tag">施工识别</span><span class="tag">土地利用/覆盖分类</span><span class="tag">水体提取</span></div>
+      </div>
+    </div>
+
+    <h2 class="section">试着这样问</h2>
+    <div class="examples">
+      <div class="ex"><span>帮我生成雅江区域去年九月的水体分布报告</span></div>
+      <div class="ex"><span>哈尔滨新区 2025 年 10 月的建筑物提取</span></div>
+      <div class="ex"><span>看看海淀区上个月的道路提取情况</span></div>
+    </div>
+
+    <h2 class="section">你会得到一份怎样的报告</h2>
+    <div class="deliver">
+      <ul>
+        <li>一段专业的分析摘要，读一眼就懂结论</li>
+        <li>关键指标卡片，量化呈现分析结果</li>
+        <li>遥感结果图与叠加图，直观可视</li>
+        <li>主要发现与风险提示，辅助判断</li>
+        <li>可落地的后续建议</li>
+        <li>可在线预览或下载的完整报告</li>
+      </ul>
+    </div>
+
+    <p class="footer">
+      助手支持多轮对话，会记住你上一次的地区和时间，让追问和调整更自然。<br>
+      面向开发者？查看 <a href="/api-docs">接口文档</a>。
+    </p>
   </main>
 </body>
 </html>
