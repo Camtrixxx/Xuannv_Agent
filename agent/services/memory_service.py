@@ -328,7 +328,7 @@ class MemoryService:
         }
 
     def _guess_task(self, summary: str, text: str) -> str:
-        for candidate in ["地物分类", "水体分布", "水体提取", "建筑物提取", "土地利用分类", "高程地形"]:
+        for candidate in ["地物分类", "土地覆盖分类", "水体分布", "水体提取", "建筑物提取", "道路提取", "施工识别", "土地利用分类", "高程地形"]:
             if candidate in summary or candidate in text:
                 return candidate
         return "对话"

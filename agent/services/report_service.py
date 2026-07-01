@@ -220,13 +220,17 @@ class ReportService:
         source_labels = {
             "prototype": "流程验证数据",
             "aef_inference": "真实 AEF 推理",
+            "harbin_embedding_api": "哈尔滨在线专题 API",
+            "haidian_embedding_api": "海淀在线专题 API",
         }
         data_source = source_labels.get(analysis.data_source, analysis.data_source)
-        source_note = (
-            "说明：当前报告结构已按真实 AEF 接入设计；在正式模型接入前，指标用于流程验证和版式联调。"
-            if analysis.data_source == "prototype"
-            else "说明：当前报告已调用真实 AEF 推理服务；区域到 patch 的映射策略见标准化 AEF 调用字段。"
-        )
+        source_notes = {
+            "prototype": "说明：当前报告结构已按真实 AEF 接入设计；在正式模型接入前，指标用于流程验证和版式联调。",
+            "aef_inference": "说明：当前报告已调用真实 AEF 推理服务；区域到 patch 的映射策略见标准化 AEF 调用字段。",
+            "harbin_embedding_api": "说明：当前报告已调用哈尔滨在线 embedding-api；patch 选择方式见标准化调用字段。",
+            "haidian_embedding_api": "说明：当前报告已调用海淀在线 embedding-api；专题结果来自 patch 级结果图接口。",
+        }
+        source_note = source_notes.get(analysis.data_source, "说明：当前报告已调用区域模型服务。")
         return f"""<!doctype html>
 <!-- {REPORT_TEMPLATE_VERSION} -->
 <html lang="zh-CN">
