@@ -261,6 +261,27 @@ class IntentService:
             and any(cue in prompt for cue in followup_cues)
         ):
             message_type = MessageType.FOLLOW_UP
+
+        # A question (even one that names a region/task/month) is conversation, not a
+        # report request — unless the user explicitly asks to produce one. Route it to
+        # discussion so we never surprise the user with a report they didn't ask for.
+        request_verbs = [
+            "生成", "出一份", "出份", "做一份", "做份", "来一份", "来份", "给我",
+            "帮我生成", "帮我出", "帮我做", "帮我来", "写一份", "整一份",
+        ]
+        has_request_verb = any(v in prompt for v in request_verbs)
+        question_tail = prompt.rstrip("。.！!~ 、,，").endswith(
+            ("吗", "呢", "?", "？", "什么", "哪些", "哪个", "哪年", "哪月", "啥")
+        )
+        question_phrases = [
+            "什么", "区别", "为什么", "为何", "啥意思", "是不是", "是否", "准不准", "准吗",
+            "靠谱", "怎么样", "怎样", "如何", "有没有", "能分析", "能做",
+            "支持哪", "可用月份", "多少", "哪些任务", "哪些月份", "可以分析", "对比一下",
+        ]
+        is_question = question_tail or any(p in prompt for p in question_phrases)
+        if message_type == MessageType.REPORT_REQUEST and is_question and not has_request_verb:
+            message_type = MessageType.FOLLOW_UP
+
         has_report_content = task_in_prompt or region_in_prompt or "报告" in prompt or "专题" in prompt
         if message_type in {MessageType.FREE_CHAT, MessageType.CHANGE_CONTEXT, MessageType.CONFIRMATION, MessageType.FOLLOW_UP}:
             confidence = 0.82

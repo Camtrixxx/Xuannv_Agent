@@ -109,3 +109,23 @@ def test_detailed_request_with_new_task_is_not_followup():
     intent = _intent("详细分析雅江区域2025年9月的水体分布")
     assert intent.message_type != MessageType.FOLLOW_UP
     assert intent.task == "水体分布"
+
+
+def test_questions_never_become_report_requests():
+    # Even with a region/task/month, a question must not be a report request.
+    for prompt in (
+        "哈尔滨新区2025年9月的建筑物提取准吗",
+        "海淀能分析什么",
+        "水体提取和水体分布有什么区别",
+        "雅江2025年9月的地物分类怎么样",
+        "哈尔滨支持哪些任务",
+    ):
+        assert _intent(prompt).message_type == MessageType.FOLLOW_UP, prompt
+
+
+def test_explicit_request_still_reports():
+    # An imperative "生成…报告" or a full spec stays a report request.
+    assert _intent("生成哈尔滨新区2025年9月建筑物提取报告").message_type != MessageType.FOLLOW_UP
+    full = _intent("帮我分析雅江区域2025年9月的地物分类")
+    assert full.message_type != MessageType.FOLLOW_UP
+    assert full.task == "地物分类" and full.is_complete
