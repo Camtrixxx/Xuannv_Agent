@@ -47,6 +47,13 @@ REGION_COVERAGE_HINT: dict[str, str] = {
     "haidian": "北京市海淀区目前可分析 2025 年 12 月至 2026 年 5 月",
 }
 
+# User-facing task names each region supports (all recognized by the intent parser).
+REGION_TASKS: dict[str, list[str]] = {
+    "yajiang": ["地物分类", "水体分布", "高程地形"],
+    "harbin": ["建筑物提取", "土地利用分类", "水体提取"],
+    "haidian": ["建筑物提取", "道路提取", "施工识别", "土地利用分类", "土地覆盖分类", "水体提取"],
+}
+
 
 def resolve_region_id(region: str) -> str:
     text = str(region or "")
@@ -61,6 +68,14 @@ def resolve_region_id(region: str) -> str:
 
 def available_months(region: str) -> list[str]:
     return REGION_MONTHS.get(resolve_region_id(region), [])
+
+
+def region_tasks(region: str) -> list[str]:
+    return REGION_TASKS.get(resolve_region_id(region), [])
+
+
+def coverage_hint(region: str) -> str:
+    return REGION_COVERAGE_HINT.get(resolve_region_id(region), "该区域的可用月份有限")
 
 
 def is_month_available(region: str, month: str) -> bool:

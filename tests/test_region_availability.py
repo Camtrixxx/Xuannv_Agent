@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from agent.services.region_availability import (
     is_month_available,
+    region_tasks,
     resolve_region_id,
     unavailable_message,
 )
@@ -35,6 +36,12 @@ def test_haidian_coverage():
     assert is_month_available("北京市海淀区", "2026-05")
     assert not is_month_available("北京市海淀区", "2025-11")
     assert not is_month_available("北京市海淀区", "2026-06")
+
+
+def test_region_tasks():
+    assert region_tasks("雅江区域") == ["地物分类", "水体分布", "高程地形"]
+    assert "道路提取" in region_tasks("北京市海淀区")
+    assert "建筑物提取" in region_tasks("哈尔滨新区")
 
 
 def test_unavailable_message_is_friendly():

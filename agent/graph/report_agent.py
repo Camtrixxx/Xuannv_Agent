@@ -9,7 +9,12 @@ from agent.services.analysis_service import MockAnalysisService
 from agent.services.intent_service import IntentService
 from agent.services.llm_provider import DeepSeekProvider, LLMProvider
 from agent.services.memory_service import MemoryService
-from agent.services.region_availability import is_month_available, unavailable_message
+from agent.services.region_availability import (
+    coverage_hint,
+    is_month_available,
+    region_tasks,
+    unavailable_message,
+)
 from agent.services.regional_analysis_service import RegionalAnalysisService
 from agent.services.report_service import ReportService
 
@@ -172,7 +177,7 @@ class ReportAgent:
 
         if missing:
             state["status"] = AgentStatus.NEEDS_INPUT
-            state["message"] = self._clarify_message(missing)
+            state["message"] = self._clarify_message(missing, intent.region)
             return state
 
         # Pre-validate the month against the region's real coverage so an
@@ -196,21 +201,21 @@ class ReportAgent:
             return AgentRoute.ASK_CLARIFICATION
         return AgentRoute.RUN_ANALYSIS
 
-    def _clarify_message(self, missing: list[str]) -> str:
+    def _clarify_message(self, missing: list[str], region: str = "") -> str:
         need_task = "task" in missing
         need_month = "time_range" in missing
+        tasks = region_tasks(region)
+        task_list = "、".join(tasks) if tasks else "地物分类、水体分布、高程地形"
+        region_name = region or "该区域"
+        hint = coverage_hint(region)
         if need_task and need_month:
             return (
-                "好的，帮你生成报告～ 想分析什么呢？可以点上方的任务标签，"
-                "或直接告诉我，比如“水体分布”“建筑物提取”“地物分类”；"
-                "另外还想看哪个月份？例如：去年九月、2025年9月。"
+                f"好的，帮你生成报告～ {region_name}可以分析：{task_list}。"
+                f"你想看哪一个、哪个月份呢？（{hint}）"
             )
         if need_task:
-            return (
-                "想分析什么呢？可以点上方的任务标签，或直接告诉我，"
-                "比如“水体分布”“建筑物提取”“地物分类”“高程地形”。"
-            )
-        return "请补充要分析的月份，例如：去年十月、2025年9月。"
+            return f"{region_name}可以分析：{task_list}。你想看哪一个呢？"
+        return f"请补充要分析的月份。{hint}。"
 
     def _ask_clarification(self, state: ReportAgentState) -> ReportAgentState:
         state["status"] = AgentStatus.NEEDS_INPUT
@@ -218,7 +223,8 @@ class ReportAgent:
         if not state.get("message"):
             intent = state.get("intent")
             missing = intent.missing_fields if intent else ["time_range"]
-            state["message"] = self._clarify_message(missing)
+            region = intent.region if intent else ""
+            state["message"] = self._clarify_message(missing, region)
         return state
 
     def _chat_response(self, state: ReportAgentState) -> ReportAgentState:
