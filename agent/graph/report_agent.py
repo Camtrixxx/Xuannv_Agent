@@ -59,12 +59,10 @@ class ReportAgent:
                 state = self._chat_response(state)
             elif route == AgentRoute.ASK_CLARIFICATION:
                 state = self._ask_clarification(state)
-            elif route == AgentRoute.ASK_CONFIRMATION:
-                state = self._ask_confirmation(state)
             else:
                 state = self._generate_report(self._run_analysis(state))
             state = self._write_memory(state)
-            if state.get("status") in {AgentStatus.NEEDS_INPUT, AgentStatus.NEEDS_CONFIRMATION, AgentStatus.CHAT}:
+            if state.get("status") in {AgentStatus.NEEDS_INPUT, AgentStatus.CHAT}:
                 return self._response_from_state(request, state)
         else:
             state = self.graph.invoke({"request": request})
@@ -97,7 +95,6 @@ class ReportAgent:
         graph.add_node("parse_intent", self._parse_intent)
         graph.add_node("merge_memory", self._merge_memory)
         graph.add_node("ask_clarification", self._ask_clarification)
-        graph.add_node("ask_confirmation", self._ask_confirmation)
         graph.add_node("chat_response", self._chat_response)
         graph.add_node("run_analysis", self._run_analysis)
         graph.add_node("generate_report", self._generate_report)
@@ -111,12 +108,10 @@ class ReportAgent:
             {
                 AgentRoute.CHAT_RESPONSE: "chat_response",
                 AgentRoute.ASK_CLARIFICATION: "ask_clarification",
-                AgentRoute.ASK_CONFIRMATION: "ask_confirmation",
                 AgentRoute.RUN_ANALYSIS: "run_analysis",
             },
         )
         graph.add_edge("ask_clarification", "write_memory")
-        graph.add_edge("ask_confirmation", "write_memory")
         graph.add_edge("chat_response", "write_memory")
         graph.add_edge("run_analysis", "generate_report")
         graph.add_edge("generate_report", "write_memory")
@@ -178,10 +173,7 @@ class ReportAgent:
             if previous_time:
                 intent.time_range = previous_time
                 intent.missing_fields = [slot for slot in intent.missing_fields if slot != "time_range"]
-                intent.confirmation_fields = ["time_range"]
-                state["status"] = AgentStatus.NEEDS_CONFIRMATION
-                state["message"] = f"检测到你上次使用的月份是 {previous_time}，是否沿用这个月份生成报告？也可以直接输入新的月份。"
-                return state
+                intent.confirmation_fields = []
 
         if not intent.is_complete:
             state["status"] = AgentStatus.NEEDS_INPUT
@@ -196,20 +188,11 @@ class ReportAgent:
             return AgentRoute.CHAT_RESPONSE
         if state.get("status") == AgentStatus.NEEDS_INPUT:
             return AgentRoute.ASK_CLARIFICATION
-        if state.get("status") == AgentStatus.NEEDS_CONFIRMATION:
-            return AgentRoute.ASK_CONFIRMATION
         return AgentRoute.RUN_ANALYSIS
 
     def _ask_clarification(self, state: ReportAgentState) -> ReportAgentState:
         state["status"] = AgentStatus.NEEDS_INPUT
         state["message"] = "请在需求里补充要分析的月份，例如：去年十月份、2025年9月。"
-        return state
-
-    def _ask_confirmation(self, state: ReportAgentState) -> ReportAgentState:
-        state["status"] = AgentStatus.NEEDS_CONFIRMATION
-        if not state.get("message"):
-            intent = state["intent"]
-            state["message"] = f"是否沿用 {intent.time_range} 作为本次分析月份？你也可以直接输入新的月份。"
         return state
 
     def _chat_response(self, state: ReportAgentState) -> ReportAgentState:
@@ -310,8 +293,6 @@ class ReportAgent:
             return ""
         if state.get("status") == AgentStatus.NEEDS_INPUT:
             return f"用户正在准备{intent.region}{intent.task}报告，缺少字段：{','.join(intent.missing_fields)}。"
-        if state.get("status") == AgentStatus.NEEDS_CONFIRMATION:
-            return f"用户正在准备{intent.region}{intent.task}报告，待确认字段：{','.join(intent.confirmation_fields)}。"
         if state.get("status") == AgentStatus.CHAT:
             return "用户正在与遥感报告助手进行自然语言对话。"
         return f"最近一次报告任务：{intent.region}，{intent.task}，{intent.time_range}。"
