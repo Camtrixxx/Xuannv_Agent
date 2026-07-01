@@ -14,6 +14,7 @@ from agent.config import EmbeddingAPIConfig, ReportConfig
 from agent.schemas.report import AnalysisResult, ChartAsset, MetricCard, ReportRequest
 from agent.services.common import bbox_intersection_score
 from agent.services.region_availability import HARBIN_MONTHS
+from agent.services.satellite_basemap import basemap_chart
 
 
 TASK_TO_HARBIN = {
@@ -79,6 +80,9 @@ class HarbinEmbeddingAnalysisService:
 
         task_display = TASK_DISPLAY.get(task_id, request.task)
         charts = self._build_charts(request, task_id, task_display, patch_id, result, embedding_asset_url)
+        basemap = basemap_chart(patch.get("bounds_wgs84"), self.asset_dir, f"harbin-{patch_id}")
+        if basemap:
+            charts = [basemap, *charts]
 
         class_names = [str(item.get("name") or item.get("id")) for item in classes]
         metrics = self._build_metrics(request, task_display, task_id, patch, class_names, task_summary)

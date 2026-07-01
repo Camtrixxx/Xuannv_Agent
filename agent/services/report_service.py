@@ -13,7 +13,7 @@ from agent.services.common import extract_json_object
 from agent.services.llm_provider import DeepSeekProvider, LLMProvider
 
 
-REPORT_TEMPLATE_VERSION = "agent-report-v5"
+REPORT_TEMPLATE_VERSION = "agent-report-v6"
 
 # Metric cards that are metadata/plumbing rather than business findings. These are
 # already conveyed by the header chips, so we keep them out of the metric grid.

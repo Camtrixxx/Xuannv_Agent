@@ -166,7 +166,8 @@ agent/
   schemas/       Pydantic-style dataclasses for request/response/report
   services/      Intent parsing, memory, report gen, LLM provider, regional adapters
                  (aef/harbin/haidian), patch selection + Yajiang local patch index,
-                 common.py (shared bbox scoring + LLM JSON extraction)
+                 satellite_basemap.py (Esri World Imagery tiles for the patch footprint),
+                 common.py (shared bbox scoring + LLM JSON extraction + markdown stripping)
 tests/           pytest units for the deterministic, network-free helpers
   prompts/       (reserved, currently empty)
   ui/            Mock frontend HTML page

@@ -16,6 +16,7 @@ from agent.config import EmbeddingAPIConfig, ReportConfig
 from agent.schemas.report import AnalysisResult, ChartAsset, MetricCard, ReportRequest
 from agent.services.common import bbox_intersection_score
 from agent.services.patch_selection_service import TASK_TO_HAIDIAN
+from agent.services.satellite_basemap import basemap_chart
 
 
 TASK_DISPLAY = {
@@ -90,6 +91,7 @@ class HaidianEmbeddingAnalysisService:
         task_summary = self._get_json_optional(f"/regions/haidian/tasks/{task_id}/summary?version=v1")
         image_stats = self._image_stats(result_asset, task_id)
         task_display = TASK_DISPLAY.get(task_id, request.task)
+        basemap = basemap_chart(patch.get("bounds_wgs84"), self.asset_dir, f"haidian-{patch_id}")
 
         return AnalysisResult(
             task=task_display,
@@ -149,6 +151,7 @@ class HaidianEmbeddingAnalysisService:
                 "fingerprint": self._fingerprint(task_id, patch_id, month, {"summary": task_summary, "image": image_stats}),
             },
             charts=[
+                *([basemap] if basemap else []),
                 ChartAsset(
                     title=f"{task_display}专题结果",
                     kind="image",

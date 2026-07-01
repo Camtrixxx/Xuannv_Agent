@@ -12,6 +12,8 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 from agent.config import AEFConfig, ReportConfig
 from agent.schemas.report import AnalysisResult, ChartAsset, MetricCard, ReportRequest
+from agent.services.satellite_basemap import basemap_chart
+from agent.services.yajiang_patch_index_service import YajiangPatchIndexService
 
 
 TASK_TO_AEF = {
@@ -120,6 +122,7 @@ class AEFAnalysisService:
         self.asset_dir = self.report_config.asset_dir
         self.asset_dir.mkdir(parents=True, exist_ok=True)
         self.patch_selector = patch_selector or MockPatchSelector()
+        self.patch_index = YajiangPatchIndexService()
         self.opener = build_opener(ProxyHandler({}))
 
     def analyze(self, request: ReportRequest) -> AnalysisResult:
@@ -142,6 +145,9 @@ class AEFAnalysisService:
         summary = payload.get("summary") or {}
         items = payload.get("items") or []
         charts = self._build_charts(aef_task, payload)
+        basemap = basemap_chart(self._patch_bounds(sample_indices, request), self.asset_dir, f"yajiang-{sorted(sample_indices)}")
+        if basemap:
+            charts = [basemap, *charts]
         metrics = self._build_metrics(request, aef_task, model_name, summary, items, selector_source)
         findings = self._build_findings(request, aef_task, summary, items, model_name)
         recommendations = self._build_recommendations(aef_task, selector_source)
@@ -199,6 +205,23 @@ class AEFAnalysisService:
 
     def _normalize_task(self, task: str) -> str:
         return TASK_TO_AEF.get(task, "landcover")
+
+    def _patch_bounds(self, sample_indices: list[int], request: ReportRequest) -> list[float] | None:
+        """WGS84 bounds of the selected patch: local index by sample_index, else the AOI."""
+        wanted = set(sample_indices)
+        try:
+            for patch in self.patch_index.patches:
+                if patch.get("sample_index") in wanted:
+                    bounds = patch.get("bounds_wgs84")
+                    if bounds:
+                        return [float(v) for v in bounds]
+        except Exception:
+            pass
+        aoi = request.aoi if isinstance(request.aoi, dict) else {}
+        coords = aoi.get("coordinates")
+        if aoi.get("type") == "bbox" and isinstance(coords, list) and len(coords) == 4:
+            return [float(c) for c in coords]
+        return None
 
     def _build_distribution(self, aef_task: str, summary: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
         """Surface the land-cover class distribution as a clean table."""
