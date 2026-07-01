@@ -309,19 +309,46 @@ class ReportAgent:
 
     def _run_analysis(self, state: ReportAgentState) -> ReportAgentState:
         intent = state["intent"]
-        normalized_request = ReportRequest(
-            task=intent.task,
-            region=intent.region,
-            prompt=intent.user_prompt,
-            time_range=intent.time_range,
-            session_id=state["request"].session_id,
-            selected_patch_ids=state["request"].selected_patch_ids,
-            aoi=state["request"].aoi,
-        )
+        request = state["request"]
+        selected_patch_ids = request.selected_patch_ids
+        aoi = request.aoi
+        # If this turn brought no map selection (e.g. "换成建筑物提取"), keep the same
+        # patch as the previous report in this session so only the task/month changes —
+        # instead of falling back to a fresh global pick on a different patch.
+        inherited_patch = False
+        if not selected_patch_ids and not self._has_bbox(aoi):
+            ctx = (state.get("memory") or {}).get("report_context") or {}
+            if ctx.get("region") == intent.region and ctx.get("used_patch_ids"):
+                selected_patch_ids = list(ctx["used_patch_ids"])
+                inherited_patch = True
+
+        def _request(sel: list[str]) -> ReportRequest:
+            return ReportRequest(
+                task=intent.task,
+                region=intent.region,
+                prompt=intent.user_prompt,
+                time_range=intent.time_range,
+                session_id=request.session_id,
+                selected_patch_ids=sel,
+                aoi=aoi,
+            )
+
+        normalized_request = _request(selected_patch_ids)
         state["request"] = normalized_request
         try:
             state["analysis"] = self.analysis_service.analyze(normalized_request)
-        except Exception as exc:  # Upstream/model failure — degrade to a friendly reply.
+            return state
+        except Exception as exc:
+            # An inherited patch may not support the new task — fall back to a fresh
+            # pick so the user still gets a report (just on a suitable patch).
+            if inherited_patch:
+                try:
+                    normalized_request = _request([])
+                    state["request"] = normalized_request
+                    state["analysis"] = self.analysis_service.analyze(normalized_request)
+                    return state
+                except Exception as exc2:
+                    exc = exc2
             state["analysis"] = None
             state["status"] = AgentStatus.NEEDS_INPUT
             state["message"] = (
@@ -398,7 +425,32 @@ class ReportAgent:
             "metrics": [{"label": m.label, "value": m.value} for m in (report.metrics or [])],
             "distribution": getattr(analysis, "data_table", []) or [],
             "sections": report.sections or [],
+            # Patch(es) actually used, so a task/month change reuses the same location.
+            "used_patch_ids": self._used_patch_ids(analysis),
         }
+
+    @staticmethod
+    def _has_bbox(aoi: Any) -> bool:
+        return (
+            isinstance(aoi, dict)
+            and aoi.get("type") == "bbox"
+            and isinstance(aoi.get("coordinates"), list)
+            and len(aoi["coordinates"]) == 4
+        )
+
+    @staticmethod
+    def _used_patch_ids(analysis: Any) -> list[str]:
+        payload = getattr(analysis, "aef_payload", {}) or {}
+        patch = payload.get("patch")
+        if isinstance(patch, dict) and patch.get("patch_id"):
+            return [str(patch["patch_id"])]
+        sample_indices = payload.get("sample_indices")
+        if isinstance(sample_indices, list) and sample_indices:
+            return [f"patch_{int(i):06d}" for i in sample_indices]
+        selected = payload.get("selected_patch_ids")
+        if isinstance(selected, list) and selected:
+            return [str(s) for s in selected]
+        return []
 
     def _summarize_state(self, state: ReportAgentState) -> str:
         intent = state.get("intent")
