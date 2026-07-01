@@ -2069,8 +2069,10 @@
 
     document.querySelectorAll(".suggestion").forEach((button) => {
       button.addEventListener("click", () => {
-        document.getElementById("prompt").value = button.dataset.prompt;
-        sendMessage();
+        // Fill the input and let the user review/edit, then send manually.
+        const input = document.getElementById("prompt");
+        input.value = button.dataset.prompt;
+        input.focus();
       });
     });
 
