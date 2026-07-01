@@ -16,8 +16,9 @@
 
 | 地区 | 支持任务 | 模型/服务 |
 | --- | --- | --- |
-| 雅江区域 | 地物分类、水体分类、高程地形 | 本机 AEF 推理服务 |
+| 雅江区域 | 地物分类、水体分类、高程地形 | 本机 AEF 推理服务；支持本地 patch 空间索引 |
 | 哈尔滨新区 | 建筑物提取、土地利用分类、水体提取 | 在线 embedding-api |
+| 北京市海淀区 | 建筑物提取、道路提取、施工识别、土地利用分类、土地覆盖分类、水体提取 | 在线 embedding-api 专题结果 |
 
 雅江 AEF 服务默认复用服务器上的 `v1_2_continue_200` 模型资源。默认模型工程路径为：
 
@@ -31,7 +32,7 @@
 前端
   -> Xuannv Agent :7870
       -> 雅江 AEF 推理服务 :7862
-      -> 哈尔滨 embedding-api
+      -> 哈尔滨/海淀 embedding-api
       -> agent/reports/
 ```
 
@@ -116,7 +117,7 @@ POST /api/session/reset
 | `DEEPSEEK_API_KEY` | 空 | 可选。未设置时使用规则解析和模板报告兜底 |
 | `AGENT_PORT` | `7870` | Agent 服务端口 |
 | `AGENT_AEF_BASE_URL` | `http://127.0.0.1:7862` | 雅江 AEF 推理服务地址 |
-| `AGENT_EMBEDDING_API_BASE_URL` | `http://60.31.21.42:22065` | 哈尔滨 embedding-api 地址 |
+| `AGENT_EMBEDDING_API_BASE_URL` | `http://60.31.21.42:22065` | 哈尔滨/海淀 embedding-api 地址 |
 | `AGENT_CORS_ORIGINS` | `*` | CORS 来源 |
 | `AEF_CODE_ROOT` | `/data/heyuhang/yajiang-aef` | 外部 AEF 模型工程根目录 |
 | `AEF_PORT` | `7862` | AEF 推理服务端口 |
@@ -176,6 +177,7 @@ curl --noproxy '*' -sS http://127.0.0.1:7862/api/health
 
 - LLM 负责理解用户意图和组织报告语言，结构化指标来自模型服务。
 - 月份是报告生成的关键槽位；缺失时 Agent 会先追问。
-- 历史月份不会被静默复用，需要用户确认。
+- 新报告请求未指定月份时，会自动沿用会话中上一次的月份；仅当完全没有可用月份时才追问。
 - 前端只调用 Agent，不直接调用模型服务。
-- 当前雅江区域仍使用临时 patch 选择器，后续可替换为正式 AOI 检索服务。
+- 雅江、哈尔滨、海淀支持前端地图框选并定位 patch；雅江索引由本地 GeoTIFF 空间标签生成。
+- 雅江区域已使用本地 patch 空间索引；当未提供地图选区时，报告服务才会回退到临时 patch 选择器。

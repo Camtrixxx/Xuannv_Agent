@@ -1,4 +1,4 @@
-# Yajiang Report Agent API
+# Xuannv Agent API
 
 面向前端的统一入口是 **Agent 服务**。前端只需要访问 Agent，不需要直接访问 AEF 模型推理服务。
 
@@ -15,7 +15,7 @@ Frontend
 - 对前端暴露：`http://112.111.7.74:1112`
 - 内部依赖：
   - 雅江 AEF：`http://127.0.0.1:7862`
-  - 哈尔滨 embedding-api：`http://60.31.21.42:22065`
+  - 哈尔滨/海淀 embedding-api：`http://60.31.21.42:22065`
 - 默认已开启 CORS：`AGENT_CORS_ORIGINS=*`
 
 当前公网访问通过 EIP DNAT 转发：
@@ -33,17 +33,21 @@ Frontend
 | 中文任务 | 说明 |
 | --- | --- |
 | `地物分类` | 雅江调用 AEF 地物分类 |
-| `水体分布` / `水体提取` | 雅江调用 AEF 水体分类；哈尔滨调用 `water_extraction` 实时推理 |
+| `水体分布` / `水体提取` | 雅江调用 AEF 水体分类；哈尔滨调用 `water_extraction` 实时推理；海淀调用 `water_extraction` 专题结果 |
 | `建筑物提取` | 哈尔滨调用 `building_extraction`，同时展示预生成专题图和实时推理图 |
 | `土地利用分类` | 哈尔滨调用 `land_use_classification` 预生成专题结果 |
+| `土地覆盖分类` | 海淀调用 `land_cover_classification` 专题结果；雅江兼容到地物分类 |
+| `道路提取` | 海淀调用 `road_extraction` 专题结果 |
+| `施工识别` | 海淀调用 `construction` 专题结果 |
 | `高程地形` | 雅江调用 AEF 高程地形；哈尔滨暂不支持 |
 
 当前可用地区：
 
 | 地区 | 说明 |
 | --- | --- |
-| `雅江区域` | 本机 AEF 闭环验证区域，依赖 `127.0.0.1:7862` |
+| `雅江区域` | 本机 AEF 闭环验证区域，依赖 `127.0.0.1:7862`；支持本地 GeoTIFF patch 空间索引 |
 | `哈尔滨新区` | 在线 embedding-api 区域，依赖 `60.31.21.42:22065` |
+| `北京市海淀区` | 在线 embedding-api 区域；patch 检索、专题结果 PNG 和 embedding 预览已接入 |
 
 哈尔滨新区当前可用月份：
 
@@ -62,6 +66,19 @@ Frontend
 | `土地利用分类` | `/regions/harbin/.../tasks/land_use_classification/result` | 专题结果图、Embedding 预览图 |
 | `水体提取` | `/system-models/water_extraction/infer` | 实时推理图、Embedding 预览图 |
 
+海淀专题任务：
+
+| 任务 | Agent 标准任务 ID | 图像产物 |
+| --- | --- | --- |
+| `建筑物提取` | `building_extraction` | 专题结果图、Embedding 预览图 |
+| `道路提取` | `road_extraction` | 专题结果图、Embedding 预览图 |
+| `施工识别` | `construction` | 专题结果图、Embedding 预览图 |
+| `土地利用分类` | `land_use_classification` | 专题结果图、Embedding 预览图 |
+| `土地覆盖分类` | `land_cover_classification` | 专题结果图、Embedding 预览图 |
+| `水体提取` | `water_extraction` | 专题结果图、Embedding 预览图 |
+
+海淀当前使用 `/regions/haidian/patches/{patch_id}/tasks/{task}/result` 获取专题 PNG；`/system-models/.../infer` 暂未开放。
+
 时间格式：
 
 - 推荐由用户自然语言输入，例如：`去年九月份`、`2025年9月`
@@ -75,7 +92,6 @@ Frontend
 | --- | --- | --- |
 | `ok` | 报告已生成 | 展示 `message`，并渲染 `report` 卡片和右侧预览 |
 | `needs_input` | 缺少必要槽位，通常是月份 | 展示 `message`，等待用户继续输入 |
-| `needs_confirmation` | 需要确认是否沿用历史槽位 | 展示 `message` 和确认按钮/文本输入 |
 | `chat` | 普通自然语言对话 | 只展示 `message`，不展示报告卡片 |
 
 ## Endpoints
@@ -89,7 +105,7 @@ Frontend
 ```json
 {
   "status": "ok",
-  "service": "yajiang-report-agent",
+  "service": "xuannv-agent",
   "backend": "fastapi"
 }
 ```
@@ -172,8 +188,9 @@ Frontend
       "task": "landcover",
       "region": "雅江区域",
       "time_range": "2025-09",
-      "sample_indices": [300],
-      "selector": "temporary_deterministic_patch_selector"
+      "sample_indices": [40],
+      "selector": "frontend_selected_patch",
+      "selected_patch_ids": ["patch_000040"]
     }
   }
 }
@@ -190,6 +207,20 @@ Frontend
   "month": "2025-09",
   "patch": {"patch_id": "patch_000173"},
   "task_summary": {"total_patches": 424}
+}
+```
+
+海淀报告响应中的 `analysis.data_source` 为 `haidian_embedding_api`，`analysis.aef_payload` 会包含：
+
+```json
+{
+  "service": "http://60.31.21.42:22065",
+  "region_id": "haidian",
+  "task": "building_extraction",
+  "version": "v1",
+  "month": "202512",
+  "patch": {"patch_id": "patch_000000"},
+  "task_api_status": "available"
 }
 ```
 
@@ -230,7 +261,8 @@ absolute_image_url = AGENT_BASE_URL + response.analysis.charts[0].url
 | 地区 | 支持情况 |
 | --- | --- |
 | `哈尔滨新区` | 支持 bbox 检索 patch |
-| `雅江区域` | 暂未接入本地 patch 空间索引，仍使用临时选择器 |
+| `北京市海淀区` | 支持 bbox 检索 patch，并可按任务和月份返回真实专题结果 |
+| `雅江区域` | 支持 bbox 检索本地 patch，并将 `patch_000400` 映射为 AEF `sample_index=400` |
 
 请求示例：
 
@@ -240,6 +272,30 @@ absolute_image_url = AGENT_BASE_URL + response.analysis.charts[0].url
   "task": "土地利用分类",
   "time_range": "2025-09",
   "bbox": [126.5, 45.74, 126.57, 45.765],
+  "limit": 10
+}
+```
+
+海淀请求示例：
+
+```json
+{
+  "region": "北京市海淀区",
+  "task": "建筑物提取",
+  "time_range": "2025-12",
+  "bbox": [116.24, 39.88, 116.29, 39.90],
+  "limit": 10
+}
+```
+
+雅江请求示例：
+
+```json
+{
+  "region": "雅江区域",
+  "task": "地物分类",
+  "time_range": "2025-09",
+  "bbox": [95.03, 29.34, 95.08, 29.38],
   "limit": 10
 }
 ```

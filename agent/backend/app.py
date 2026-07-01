@@ -36,7 +36,7 @@ except ImportError:
 
 def parse_args() -> argparse.Namespace:
     config = load_config()
-    parser = argparse.ArgumentParser(description="Serve the Yajiang report agent.")
+    parser = argparse.ArgumentParser(description="Serve the Xuannv Agent backend.")
     parser.add_argument("--host", default=config.server.host)
     parser.add_argument("--port", type=int, default=config.server.port)
     parser.add_argument("--legacy-http", action="store_true", help="Use the built-in http.server fallback.")
@@ -192,7 +192,7 @@ def _api_docs_page() -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Yajiang Report Agent API</title>
+  <title>Xuannv Agent API</title>
   <style>
     body {{ margin: 0; background: #f6f7f9; color: #1f2937; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }}
     main {{ max-width: 1040px; margin: 0 auto; padding: 34px 20px 64px; }}
@@ -216,7 +216,7 @@ def _api_docs_page() -> str:
 <body>
   <main>
     <div class="top">
-      <strong>Yajiang Report Agent</strong>
+      <strong>Xuannv Agent</strong>
       <nav><a href="/docs">Swagger</a> · <a href="/api-docs.md">Markdown</a> · <a href="/api/health">Health</a></nav>
     </div>
     <article>{body}</article>
@@ -236,7 +236,7 @@ def create_app(agent: ReportAgent | None = None):
 
     report_agent = agent or ReportAgent()
     patch_selector = PatchSelectionService()
-    app = FastAPI(title="Yajiang Report Agent", version="0.2.0")
+    app = FastAPI(title="Xuannv Agent", version="0.2.0")
     config = load_config()
     if CORSMiddleware is not None:
         app.add_middleware(
@@ -274,7 +274,7 @@ def create_app(agent: ReportAgent | None = None):
     def health() -> dict:
         return {
             "status": "ok",
-            "service": "yajiang-report-agent",
+            "service": "xuannv-agent",
             "backend": "fastapi",
         }
 
@@ -335,7 +335,7 @@ def make_handler(agent: ReportAgent):
                 self._workflow_page()
                 return
             if parsed.path == "/api/health":
-                json_response(self, {"status": "ok", "service": "yajiang-report-agent", "backend": "http.server"})
+                json_response(self, {"status": "ok", "service": "xuannv-agent", "backend": "http.server"})
                 return
             if parsed.path == "/api/sessions":
                 params = parse_qs(parsed.query)
@@ -453,10 +453,10 @@ WORKFLOW_HTML = """<!doctype html>
     <p class="lead">当前流程支持多轮会话、SQLite 持久记忆、规则优先意图解析、LLM 兜底、真实 AEF 推理服务调用、报告复用与运行产物治理。时间月份仍是报告生成必填字段；若历史月份存在，Agent 会先请求用户确认，不会静默复用。</p>
     <div class="flow">
       <article class="node"><span class="badge">Node 1</span><h2>load_memory</h2><p><strong>输入：</strong>session_id、用户消息、前端任务/地区标签。</p><p><strong>职责：</strong>读取 SQLite 会话状态，追加用户消息。</p></article>
-      <article class="node"><span class="badge">Node 2</span><h2>parse_intent</h2><p><strong>服务：</strong>规则优先 + DeepSeek 兜底。</p><p><strong>分类：</strong>report_request / slot_fill / free_chat / change_context / confirmation。</p></article>
-      <article class="node"><span class="badge">Node 3</span><h2>merge_memory</h2><p><strong>职责：</strong>合并新槽位和历史槽位。</p><p><strong>策略：</strong>历史月份存在但用户未指定时先确认。</p></article>
-      <article class="node"><span class="badge">Node 4</span><h2>route</h2><p><strong>分支：</strong>ask_clarification / ask_confirmation / chat_response / run_analysis。</p><p><strong>规则：</strong>缺月份先追问，聊天不生成报告。</p></article>
-      <article class="node"><span class="badge">Node 5</span><h2>ask/chat</h2><p><strong>追问：</strong>补月份或确认沿用历史月份。</p><p><strong>聊天：</strong>自然语言回答，不触发报告。</p></article>
+      <article class="node"><span class="badge">Node 2</span><h2>parse_intent</h2><p><strong>服务：</strong>规则优先 + DeepSeek 兜底。</p><p><strong>分类：</strong>report_request / slot_fill / free_chat / change_context。</p></article>
+      <article class="node"><span class="badge">Node 3</span><h2>merge_memory</h2><p><strong>职责：</strong>合并新槽位和历史槽位。</p><p><strong>策略：</strong>历史月份存在但用户未指定时直接沿用，减少二次确认。</p></article>
+      <article class="node"><span class="badge">Node 4</span><h2>route</h2><p><strong>分支：</strong>ask_clarification / chat_response / run_analysis。</p><p><strong>规则：</strong>缺月份且无历史月份时追问，聊天不生成报告。</p></article>
+      <article class="node"><span class="badge">Node 5</span><h2>ask/chat</h2><p><strong>追问：</strong>仅在没有可用月份时补月份。</p><p><strong>聊天：</strong>自然语言回答，不触发报告。</p></article>
       <article class="node"><span class="badge">Node 6</span><h2>run_analysis</h2><p><strong>输入：</strong>标准化 AEF 调用字段。</p><p><strong>输出：</strong>真实 AEF 指标、图像产物、风险、局限性和专题解读。</p></article>
       <article class="node"><span class="badge">Node 7</span><h2>generate_report</h2><p><strong>服务：</strong>ReportService + DeepSeek。</p><p><strong>输出：</strong>HTML、Markdown、复用标记和报告记录。</p></article>
       <article class="node"><span class="badge">Node 8</span><h2>write_memory</h2><p><strong>职责：</strong>写回槽位、状态、摘要、消息和报告索引。</p><p><strong>输出：</strong>下一轮可继续补槽、改任务或聊天。</p></article>
@@ -469,8 +469,9 @@ WORKFLOW_HTML = """<!doctype html>
   "region": "雅江区域",
   "time_range": "2025-10",
   "aoi": {"name": "雅江区域"},
-  "sample_indices": [300],
-  "selector": "temporary_deterministic_patch_selector",
+  "sample_indices": [40],
+  "selector": "frontend_selected_patch",
+  "selected_patch_ids": ["patch_000040"],
   "outputs": ["metrics", "artifacts", "report_assets"]
 }</pre>
       </section>
@@ -493,7 +494,7 @@ WORKFLOW_HTML = """<!doctype html>
 def run_legacy_server(host: str, port: int) -> None:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer((host, port), make_handler(ReportAgent()))
-    print(f"Yajiang report agent listening on http://{host}:{port}")
+    print(f"Xuannv Agent listening on http://{host}:{port}")
     print(f"Open the UI at http://{host}:{port}/")
     print("Health check: /api/health")
     try:

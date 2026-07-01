@@ -1,1 +1,1 @@
-"""Agent application layer for the Yajiang AEF project."""
+"""Xuannv Agent application layer."""
