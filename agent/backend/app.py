@@ -17,6 +17,7 @@ from agent.services.patch_selection_service import PatchSelectionService
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 UI_PATH = PROJECT_ROOT / "agent" / "ui" / "agent_dashboard_mock.html"
 API_DOC_PATH = PROJECT_ROOT / "agent" / "API.md"
+FRONTEND_GUIDE_PATH = PROJECT_ROOT / "agent" / "FRONTEND_GUIDE.md"
 REPORT_DIR = PROJECT_ROOT / "agent" / "reports"
 
 try:
@@ -184,15 +185,15 @@ def _render_markdown_html(markdown_text: str) -> str:
     return "\n".join(chunks)
 
 
-def _api_docs_page() -> str:
-    markdown_text = API_DOC_PATH.read_text(encoding="utf-8")
+def _docs_page(markdown_path: Path, title: str) -> str:
+    markdown_text = markdown_path.read_text(encoding="utf-8")
     body = _render_markdown_html(markdown_text)
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Xuannv Agent API</title>
+  <title>{html.escape(title)}</title>
   <style>
     body {{ margin: 0; background: #f6f7f9; color: #1f2937; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }}
     main {{ max-width: 1040px; margin: 0 auto; padding: 34px 20px 64px; }}
@@ -217,13 +218,21 @@ def _api_docs_page() -> str:
   <main>
     <div class="top">
       <strong>Xuannv Agent</strong>
-      <nav><a href="/docs">Swagger</a> · <a href="/api-docs.md">Markdown</a> · <a href="/api/health">Health</a></nav>
+      <nav><a href="/frontend-guide">前端指南</a> · <a href="/api-docs">接口文档</a> · <a href="/docs">Swagger</a> · <a href="/api/health">Health</a></nav>
     </div>
     <article>{body}</article>
   </main>
 </body>
 </html>
 """
+
+
+def _api_docs_page() -> str:
+    return _docs_page(API_DOC_PATH, "Xuannv Agent API")
+
+
+def _frontend_guide_page() -> str:
+    return _docs_page(FRONTEND_GUIDE_PATH, "Xuannv Agent 前端接入指南")
 
 
 def _no_store_html(content: str) -> HTMLResponse:
@@ -269,6 +278,14 @@ def create_app(agent: ReportAgent | None = None):
     @app.get("/api-docs.md")
     def api_docs_markdown() -> FileResponse:
         return FileResponse(API_DOC_PATH, media_type="text/markdown; charset=utf-8")
+
+    @app.get("/frontend-guide", response_class=HTMLResponse)
+    def frontend_guide() -> HTMLResponse:
+        return HTMLResponse(_frontend_guide_page())
+
+    @app.get("/frontend-guide.md")
+    def frontend_guide_markdown() -> FileResponse:
+        return FileResponse(FRONTEND_GUIDE_PATH, media_type="text/markdown; charset=utf-8")
 
     @app.get("/api/health")
     def health() -> dict:
