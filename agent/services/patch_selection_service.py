@@ -8,6 +8,7 @@ from urllib.parse import urlencode, urljoin
 from urllib.request import ProxyHandler, Request, build_opener
 
 from agent.config import EmbeddingAPIConfig
+from agent.services.common import bbox_intersection_score
 from agent.services.harbin_embedding_service import STATIC_TASKS, TASK_TO_HARBIN, aef_available
 from agent.services.yajiang_patch_index_service import YajiangPatchIndexService
 
@@ -67,21 +68,6 @@ class PatchSearchResult:
     patches: list[dict[str, Any]]
     selected_patch_ids: list[str]
     message: str = ""
-
-
-def _bbox_intersection_score(a: list[float], b: list[float]) -> float:
-    if len(a) != 4 or len(b) != 4:
-        return 0.0
-    left = max(a[0], b[0])
-    bottom = max(a[1], b[1])
-    right = min(a[2], b[2])
-    top = min(a[3], b[3])
-    if right <= left or top <= bottom:
-        return 0.0
-    inter = (right - left) * (top - bottom)
-    patch_area = max((a[2] - a[0]) * (a[3] - a[1]), 1e-12)
-    query_area = max((b[2] - b[0]) * (b[3] - b[1]), 1e-12)
-    return float(inter / min(patch_area, query_area))
 
 
 class PatchSelectionService:
@@ -168,7 +154,7 @@ class PatchSelectionService:
                 if not self._is_usable_patch(region_id, patch, task_id, time_range):
                     continue
                 patch_bbox = patch.get("bounds_wgs84") or []
-                score = _bbox_intersection_score([float(v) for v in patch_bbox], bbox)
+                score = bbox_intersection_score([float(v) for v in patch_bbox], bbox)
                 item = dict(patch)
                 item["score"] = round(score, 6)
                 item["task_available"] = self._task_available(region_id, patch, task_id)

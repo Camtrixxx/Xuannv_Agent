@@ -14,7 +14,8 @@ from PIL import Image
 
 from agent.config import EmbeddingAPIConfig, ReportConfig
 from agent.schemas.report import AnalysisResult, ChartAsset, MetricCard, ReportRequest
-from agent.services.patch_selection_service import TASK_TO_HAIDIAN, _bbox_intersection_score
+from agent.services.common import bbox_intersection_score
+from agent.services.patch_selection_service import TASK_TO_HAIDIAN
 
 
 TASK_DISPLAY = {
@@ -226,7 +227,7 @@ class HaidianEmbeddingAnalysisService:
                 if not self._is_usable_patch(patch, task_id, month):
                     continue
                 patch_bbox = patch.get("bounds_wgs84") or []
-                score = _bbox_intersection_score([float(v) for v in patch_bbox], bbox)
+                score = bbox_intersection_score([float(v) for v in patch_bbox], bbox)
                 item = dict(patch)
                 item["_agent_aoi_score"] = round(score, 6)
                 candidates.append(item)

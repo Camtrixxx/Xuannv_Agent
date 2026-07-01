@@ -7,6 +7,7 @@ from datetime import date
 
 from agent.config import IntentConfig
 from agent.schemas.report import AgentIntent, MessageType, ReportRequest, infer_time_range
+from agent.services.common import extract_json_object
 from agent.services.llm_provider import DeepSeekProvider, LLMProvider
 
 
@@ -133,7 +134,7 @@ class IntentService:
         text = self.llm.complete(system_prompt, user_prompt)
         if not text:
             return None
-        payload = self._extract_json(text)
+        payload = extract_json_object(text)
         if payload is None:
             return None
         return AgentIntent(
@@ -279,17 +280,3 @@ class IntentService:
         intent.missing_fields = sorted(missing)
         intent.confirmation_fields = sorted(confirmation)
         return intent
-
-    def _extract_json(self, text: str) -> dict | None:
-        stripped = text.strip()
-        if stripped.startswith("```"):
-            stripped = re.sub(r"^```(?:json)?", "", stripped).strip()
-            stripped = re.sub(r"```$", "", stripped).strip()
-        match = re.search(r"\{.*\}", stripped, flags=re.S)
-        if not match:
-            return None
-        try:
-            obj = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return None
-        return obj if isinstance(obj, dict) else None

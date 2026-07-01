@@ -10,6 +10,7 @@ from pathlib import Path
 
 from agent.config import ReportConfig
 from agent.schemas.report import AnalysisResult, ReportArtifact, ReportRequest
+from agent.services.common import extract_json_object
 from agent.services.llm_provider import DeepSeekProvider, LLMProvider
 
 
@@ -128,7 +129,7 @@ class ReportService:
         )
         llm_text = self.llm.complete(system_prompt, user_prompt)
         if llm_text:
-            parsed = self._extract_json(llm_text)
+            parsed = extract_json_object(llm_text)
             if parsed:
                 return {
                     "abstract": str(parsed.get("abstract") or self._fallback_abstract(request, analysis)),
@@ -162,20 +163,6 @@ class ReportService:
             f"综合区域统计、专题指标与图表信息形成分析结论。{analysis.summary}"
             "报告重点关注主导地表类型、空间格局特征、结果可信度、风险提示和后续行动建议。"
         )
-
-    def _extract_json(self, text: str) -> dict | None:
-        stripped = text.strip()
-        if stripped.startswith("```"):
-            stripped = re.sub(r"^```(?:json)?", "", stripped).strip()
-            stripped = re.sub(r"```$", "", stripped).strip()
-        match = re.search(r"\{.*\}", stripped, flags=re.S)
-        if not match:
-            return None
-        try:
-            obj = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return None
-        return obj if isinstance(obj, dict) else None
 
     def _list_or_default(self, value, default: list[str]) -> list[str]:
         if not isinstance(value, list):

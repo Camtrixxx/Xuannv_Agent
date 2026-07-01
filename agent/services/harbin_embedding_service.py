@@ -12,6 +12,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 from agent.config import EmbeddingAPIConfig, ReportConfig
 from agent.schemas.report import AnalysisResult, ChartAsset, MetricCard, ReportRequest
+from agent.services.common import bbox_intersection_score
 
 
 TASK_TO_HARBIN = {
@@ -54,21 +55,6 @@ def _stable_pick(items: list[dict[str, Any]], key: str, count: int) -> list[dict
         items,
         key=lambda item: hashlib.sha1(f"{key}:{item.get('patch_id')}".encode("utf-8")).hexdigest(),
     )[:count]
-
-
-def _bbox_intersection_score(a: list[float], b: list[float]) -> float:
-    if len(a) != 4 or len(b) != 4:
-        return 0.0
-    left = max(a[0], b[0])
-    bottom = max(a[1], b[1])
-    right = min(a[2], b[2])
-    top = min(a[3], b[3])
-    if right <= left or top <= bottom:
-        return 0.0
-    inter = (right - left) * (top - bottom)
-    patch_area = max((a[2] - a[0]) * (a[3] - a[1]), 1e-12)
-    query_area = max((b[2] - b[0]) * (b[3] - b[1]), 1e-12)
-    return float(inter / min(patch_area, query_area))
 
 
 def aef_available(task_id: str, patch: dict[str, Any]) -> bool:
@@ -231,7 +217,7 @@ class HarbinEmbeddingAnalysisService:
                 if not self._is_usable_patch(patch, task_id, request.time_range):
                     continue
                 patch_bbox = patch.get("bounds_wgs84") or []
-                score = _bbox_intersection_score([float(v) for v in patch_bbox], bbox)
+                score = bbox_intersection_score([float(v) for v in patch_bbox], bbox)
                 item = dict(patch)
                 item["_agent_aoi_score"] = round(score, 6)
                 candidates.append(item)

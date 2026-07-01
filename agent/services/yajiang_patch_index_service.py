@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.config import AGENT_ROOT, PROJECT_ROOT
+from agent.services.common import bbox_intersection_score
 
 
 DEFAULT_YAJIANG_RAW_ROOT = PROJECT_ROOT / "downloads" / "xuannv_embeddings" / "extracted" / "raw" / "yajiang"
@@ -50,21 +51,6 @@ TIFF_TYPE_FORMAT = {
 }
 
 
-def _bbox_intersection_score(a: list[float], b: list[float]) -> float:
-    if len(a) != 4 or len(b) != 4:
-        return 0.0
-    left = max(a[0], b[0])
-    bottom = max(a[1], b[1])
-    right = min(a[2], b[2])
-    top = min(a[3], b[3])
-    if right <= left or top <= bottom:
-        return 0.0
-    inter = (right - left) * (top - bottom)
-    patch_area = max((a[2] - a[0]) * (a[3] - a[1]), 1e-12)
-    query_area = max((b[2] - b[0]) * (b[3] - b[1]), 1e-12)
-    return float(inter / min(patch_area, query_area))
-
-
 @dataclass(slots=True)
 class YajiangPatchIndexConfig:
     raw_root: Path = DEFAULT_YAJIANG_RAW_ROOT
@@ -96,7 +82,7 @@ class YajiangPatchIndexService:
                 continue
             if task_id not in patch.get("available_tasks", []):
                 continue
-            score = _bbox_intersection_score([float(v) for v in patch["bounds_wgs84"]], bbox)
+            score = bbox_intersection_score([float(v) for v in patch["bounds_wgs84"]], bbox)
             if score <= 0:
                 continue
             item = dict(patch)
