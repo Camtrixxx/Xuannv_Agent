@@ -91,3 +91,16 @@ def test_capability_question_is_free_chat():
 def test_region_alias_normalized():
     intent = _intent("海淀区上个月的建筑物提取", region="雅江区域")
     assert intent.region == "北京市海淀区"
+
+
+def test_followup_question_detected():
+    intent = _intent("详细讲讲基于林地占比80.9%的这个结论")
+    assert intent.message_type == MessageType.FOLLOW_UP
+    assert intent.is_complete  # follow-up needs no slots
+
+
+def test_detailed_request_with_new_task_is_not_followup():
+    # Naming a concrete task + month means a (new) report, not a discussion.
+    intent = _intent("详细分析雅江区域2025年9月的水体分布")
+    assert intent.message_type != MessageType.FOLLOW_UP
+    assert intent.task == "水体分布"

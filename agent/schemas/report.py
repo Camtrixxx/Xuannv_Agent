@@ -29,6 +29,8 @@ class MessageType:
     FREE_CHAT = "free_chat"
     CHANGE_CONTEXT = "change_context"
     CONFIRMATION = "confirmation"
+    # Asking about / discussing / drilling into an already-generated report.
+    FOLLOW_UP = "follow_up"
 
 
 @dataclass(slots=True)

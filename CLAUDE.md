@@ -68,7 +68,7 @@ load_memory → parse_intent → merge_memory → route → ...
 ```
 
 - **load_memory**: Reads SQLite session state, appends user message
-- **parse_intent**: Rules-first classification (IntentService) with DeepSeek LLM fallback; classifies as `report_request`, `slot_fill`, `free_chat`, `change_context`, or `confirmation`
+- **parse_intent**: Rules-first classification (IntentService) with DeepSeek LLM fallback; classifies as `report_request`, `slot_fill`, `free_chat`, `change_context`, `confirmation`, or `follow_up` (a question/discussion about the already-generated report — cued by 详细/解释/为什么/这个结论… when no new task or month is named)
 - **merge_memory**: Merges new slots with historical slots; if a previous month exists but user didn't specify one on a new report request, it is silently reused (the previous two-step confirmation flow was removed). Clarification is only asked when no month is available at all.
 - **route**: Branches to `ask_clarification` (no month available), `chat_response` (casual chat), or `run_analysis` (all slots filled). There is no longer an `ask_confirmation` branch — the `AgentRoute.ASK_CONFIRMATION` / `AgentStatus.NEEDS_CONFIRMATION` constants remain defined but are unused
 - **run_analysis**: Dispatches to regional analysis service
@@ -185,6 +185,7 @@ scripts/         start/stop/status shell scripts for Agent, AEF, and both togeth
 - **Month is the only required slot** — the agent will ask for clarification if missing, even when task and region are provided
 - **Month availability is pre-validated** — before dispatching to any model/API, the agent checks the requested month against `region_availability.py` (Yajiang 2023-01..2026-03 by quarter; Harbin 2025-04/06/08/09/10; Haidian 2025-12..2026-05). An unavailable month returns a friendly `needs_input` with the region's coverage instead of a raw upstream error. Analysis failures are likewise caught and turned into a friendly reply
 - **Historical month is silently reused** — on a new report request with no month, the previous session's month is adopted without a confirmation step. Clarification is only asked when no month exists at all. (This replaced an earlier explicit-confirmation flow; the confirmation node/route/status constants remain in the code but are dead)
+- **Follow-up questions are answered grounded, not regenerated** — after a report is generated, a compact context (summary, business metrics, class distribution, deep-interpretation blocks) is stored in `sessions.report_context`. A `follow_up` (or any chat turn with a stored context) is answered by the chat LLM using that context, so the agent discusses/explains the existing report instead of producing a new one
 - **Frontend map selection is optional** — when the request carries `selected_patch_ids`/`aoi`, services prefer those patches; otherwise they fall back to AOI search or a deterministic/global pick
 - **Rules-first, LLM-fallback** for intent parsing: when rule confidence ≥ 0.6, skip the LLM call entirely
 - **All LLM calls degrade gracefully** — if `DEEPSEEK_API_KEY` is unset or the API fails, the system falls back to template-based report content and rule-based intent parsing

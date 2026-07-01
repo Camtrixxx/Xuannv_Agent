@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, TypedDict
 
 from agent.schemas.report import AgentResponse, AgentRoute, AgentStatus, MessageType, ReportRequest, to_dict
@@ -141,7 +142,7 @@ class ReportAgent:
         previous = memory.get("current_intent") or {}
         pending = memory.get("pending_slots") or []
 
-        if intent.message_type == MessageType.FREE_CHAT:
+        if intent.message_type in {MessageType.FREE_CHAT, MessageType.FOLLOW_UP}:
             state["status"] = AgentStatus.CHAT
             state["message"] = ""
             return state
@@ -223,12 +224,26 @@ class ReportAgent:
     def _chat_response(self, state: ReportAgentState) -> ReportAgentState:
         request = state["request"]
         memory = state.get("memory") or {}
-        system_prompt = "你是遥感报告助手。请用简洁中文回答用户，不要生成报告，除非用户明确要求。"
-        user_prompt = (
-            f"当前会话记忆：{memory}\n"
-            f"用户问题：{request.prompt}\n"
-            "请回答用户，并可简要说明你可以帮助生成地物分类、水体分布、高程地形报告。"
-        )
+        report_context = memory.get("report_context") or {}
+        if report_context:
+            # Grounded discussion: answer questions about the last report using its
+            # actual content, instead of regenerating a report.
+            system_prompt = (
+                "你是遥感报告助手。用户正在就上一次生成的遥感分析报告追问或深入讨论。"
+                "请基于下面提供的报告内容，用简洁、专业、通俗的中文详细回答用户的问题，"
+                "聚焦他关心的那一点——可以展开解释指标含义、结论依据、空间格局或业务建议。"
+                "不要重新生成整篇报告，也不要罗列系统参数或免责声明；报告里没有的数据不要编造。"
+            )
+            user_prompt = (
+                f"上一次报告内容（JSON）：\n{json.dumps(report_context, ensure_ascii=False)}\n\n"
+                f"用户的问题：{request.prompt}\n\n请针对性地详细回答。"
+            )
+        else:
+            system_prompt = "你是遥感报告助手。请用简洁自然的中文回答用户，不要生成报告，除非用户明确要求。"
+            user_prompt = (
+                f"用户问题：{request.prompt}\n"
+                "请自然地回答；你可以帮助生成地物分类、水体分布、高程地形等遥感专题报告。"
+            )
         text = self.chat_llm.complete(system_prompt, user_prompt)
         state["status"] = AgentStatus.CHAT
         state["message"] = text.strip() if text else self._fallback_chat_response(request.prompt)
@@ -321,8 +336,25 @@ class ReportAgent:
                 markdown_url=report.markdown_url,
                 request=to_dict(request),
             )
+            self.memory_service.set_report_context(
+                request.session_id,
+                self._report_context(request, state.get("analysis"), report),
+            )
         state["memory"] = self.memory_service.snapshot(request.session_id)
         return state
+
+    def _report_context(self, request: ReportRequest, analysis: Any, report: Any) -> dict[str, Any]:
+        """Compact snapshot of the last report so follow-up questions stay grounded."""
+        return {
+            "title": report.title,
+            "region": getattr(analysis, "region", request.region),
+            "task": getattr(analysis, "task", request.task),
+            "time_range": getattr(analysis, "time_range", request.time_range),
+            "summary": report.abstract,
+            "metrics": [{"label": m.label, "value": m.value} for m in (report.metrics or [])],
+            "distribution": getattr(analysis, "data_table", []) or [],
+            "sections": report.sections or [],
+        }
 
     def _summarize_state(self, state: ReportAgentState) -> str:
         intent = state.get("intent")

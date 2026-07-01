@@ -27,6 +27,7 @@ class ConversationMemory:
     pending_slots: list[str] = field(default_factory=list)
     mode: str = "idle"
     turn_count: int = 0
+    report_context: dict[str, Any] = field(default_factory=dict)
     updated_at: str = ""
     created_at: str = ""
 
@@ -50,7 +51,8 @@ class MemoryService:
             row = conn.execute(
                 """
                 SELECT current_intent, pending_slots, summary, mode, turn_count,
-                       last_user_message, last_agent_message, created_at, updated_at
+                       last_user_message, last_agent_message, report_context,
+                       created_at, updated_at
                 FROM sessions WHERE session_id = ?
                 """,
                 (session_id,),
@@ -66,6 +68,7 @@ class MemoryService:
                 summary=row["summary"] or "",
                 mode=row["mode"] or "idle",
                 turn_count=int(row["turn_count"] or 0),
+                report_context=self._loads(row["report_context"], {}),
                 last_user_message=row["last_user_message"] or "",
                 last_agent_message=row["last_agent_message"] or "",
                 messages=messages,
@@ -108,6 +111,14 @@ class MemoryService:
             )
         return self.get(session_id)
 
+    def set_report_context(self, session_id: str, context: dict[str, Any]) -> None:
+        with self._lock, self._connect() as conn:
+            self._ensure_session(conn, session_id)
+            conn.execute(
+                "UPDATE sessions SET report_context = ?, updated_at = ? WHERE session_id = ?",
+                (json.dumps(context, ensure_ascii=False), _now(), session_id),
+            )
+
     def reset(self, session_id: str) -> ConversationMemory:
         with self._lock, self._connect() as conn:
             conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
@@ -125,6 +136,7 @@ class MemoryService:
             "pending_slots": memory.pending_slots,
             "summary": memory.summary,
             "turn_count": memory.turn_count,
+            "report_context": memory.report_context,
             "recent_messages": memory.messages[-6:],
             "reports": self.recent_reports(session_id, limit=5),
             "created_at": memory.created_at,
@@ -250,6 +262,7 @@ class MemoryService:
                     turn_count INTEGER NOT NULL DEFAULT 0,
                     last_user_message TEXT NOT NULL DEFAULT '',
                     last_agent_message TEXT NOT NULL DEFAULT '',
+                    report_context TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -277,6 +290,10 @@ class MemoryService:
                 CREATE INDEX IF NOT EXISTS idx_reports_session_id ON reports(session_id, id);
                 """
             )
+            # Migrate older databases that predate the report_context column.
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+            if "report_context" not in columns:
+                conn.execute("ALTER TABLE sessions ADD COLUMN report_context TEXT NOT NULL DEFAULT '{}'")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)

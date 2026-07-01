@@ -112,7 +112,9 @@ class IntentService:
                 "支持地区": SUPPORTED_REGIONS,
                 "当前日期": (self.today or date.today()).isoformat(),
                 "要求": {
-                    "message_type": "report_request / slot_fill / free_chat / change_context / confirmation 之一；日常闲聊、问候、常识/时间/天气等无关问题一律 free_chat",
+                    "message_type": "report_request / slot_fill / free_chat / change_context / confirmation / follow_up 之一；"
+                    "日常闲聊、问候、常识/时间/天气等无关问题一律 free_chat；"
+                    "对上一次已生成报告结果的追问、解释、深入讨论（未指定新的任务或月份）用 follow_up",
                     "task": "只有用户文本明确提到或前端已选择时才填写，且必须是支持任务之一；否则返回空字符串，绝不猜测",
                     "region": "必须是支持地区之一，优先使用前端选择，除非用户文本明确改写",
                     "time_range": "YYYY-MM 格式；如果用户没有明确月份，返回空字符串",
@@ -238,8 +240,23 @@ class IntentService:
         time_range = request.time_range or infer_time_range(prompt, today=self.today)
         if time_range and message_type == MessageType.REPORT_REQUEST and len(prompt) <= 12:
             message_type = MessageType.SLOT_FILL
+        # A question that asks to explain/expand on existing results (and does not
+        # name a new task or month) is a follow-up discussion, not a new report.
+        followup_cues = [
+            "详细", "详解", "讲讲", "讲解", "解释", "展开", "为什么", "为何",
+            "怎么理解", "如何理解", "什么意思", "啥意思", "具体说", "具体讲",
+            "说说", "解读", "没看懂", "看不懂", "这个结论", "这一点", "这部分",
+            "上面", "刚才", "刚刚", "报告里", "这份报告", "那份报告", "怎么得出", "依据",
+        ]
+        if (
+            message_type == MessageType.REPORT_REQUEST
+            and not task_in_prompt
+            and not time_range
+            and any(cue in prompt for cue in followup_cues)
+        ):
+            message_type = MessageType.FOLLOW_UP
         has_report_content = task_in_prompt or region_in_prompt or "报告" in prompt or "专题" in prompt
-        if message_type in {MessageType.FREE_CHAT, MessageType.CHANGE_CONTEXT, MessageType.CONFIRMATION}:
+        if message_type in {MessageType.FREE_CHAT, MessageType.CHANGE_CONTEXT, MessageType.CONFIRMATION, MessageType.FOLLOW_UP}:
             confidence = 0.82
         elif has_report_content and (time_range or task_in_prompt):
             # Genuine report request — real report content is present.
@@ -272,9 +289,10 @@ class IntentService:
             MessageType.FREE_CHAT,
             MessageType.CHANGE_CONTEXT,
             MessageType.CONFIRMATION,
+            MessageType.FOLLOW_UP,
         }:
             intent.message_type = MessageType.REPORT_REQUEST
-        if intent.message_type == MessageType.FREE_CHAT:
+        if intent.message_type in {MessageType.FREE_CHAT, MessageType.FOLLOW_UP}:
             intent.missing_fields = []
             intent.confirmation_fields = []
             return intent
