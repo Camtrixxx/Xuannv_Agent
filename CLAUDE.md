@@ -44,9 +44,13 @@ scripts/status_aef_inference_service.sh
 scripts/stop_aef_inference_service.sh
 ```
 
-There is no formal test suite yet. Use Python compilation plus service smoke tests:
+A small pytest suite under `tests/` covers the deterministic, network-free
+helpers (bbox scoring, LLM JSON extraction, month inference, rule-based intent
+parsing, patch-id mapping). Run it plus Python compilation and service smoke
+tests:
 
 ```bash
+python -m pytest tests/ -q
 python -m py_compile $(find agent aef_inference -name '*.py' -print)
 scripts/status_services.sh
 curl --noproxy '*' -sS http://127.0.0.1:7870/api/health
@@ -161,7 +165,9 @@ agent/
   graph/         LangGraph state machine (ReportAgent)
   schemas/       Pydantic-style dataclasses for request/response/report
   services/      Intent parsing, memory, report gen, LLM provider, regional adapters
-                 (aef/harbin/haidian), patch selection + Yajiang local patch index
+                 (aef/harbin/haidian), patch selection + Yajiang local patch index,
+                 common.py (shared bbox scoring + LLM JSON extraction)
+tests/           pytest units for the deterministic, network-free helpers
   prompts/       (reserved, currently empty)
   ui/            Mock frontend HTML page
   assets/        (reserved, currently empty)

@@ -334,7 +334,7 @@ class MemoryService:
         return "对话"
 
     def _guess_region(self, summary: str, text: str) -> str:
-        for candidate in ["雅江区域", "哈尔滨区域", "北京市海淀区"]:
+        for candidate in ["雅江区域", "哈尔滨新区", "北京市海淀区"]:
             if candidate in summary or candidate in text:
                 return candidate
         return "未指定地区"

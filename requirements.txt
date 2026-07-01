@@ -12,3 +12,6 @@ torch>=2.5.0
 torchvision>=0.20.0
 pyyaml>=6.0.1
 tqdm>=4.66.0
+
+# dev/test
+pytest>=8.0.0
