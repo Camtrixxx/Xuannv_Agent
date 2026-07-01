@@ -56,6 +56,21 @@ def _stable_pick(items: list[dict[str, Any]], key: str, count: int) -> list[dict
     )[:count]
 
 
+def _bbox_intersection_score(a: list[float], b: list[float]) -> float:
+    if len(a) != 4 or len(b) != 4:
+        return 0.0
+    left = max(a[0], b[0])
+    bottom = max(a[1], b[1])
+    right = min(a[2], b[2])
+    top = min(a[3], b[3])
+    if right <= left or top <= bottom:
+        return 0.0
+    inter = (right - left) * (top - bottom)
+    patch_area = max((a[2] - a[0]) * (a[3] - a[1]), 1e-12)
+    query_area = max((b[2] - b[0]) * (b[3] - b[1]), 1e-12)
+    return float(inter / min(patch_area, query_area))
+
+
 def aef_available(task_id: str, patch: dict[str, Any]) -> bool:
     return task_id in (patch.get("available_tasks") or [])
 
@@ -80,6 +95,7 @@ class HarbinEmbeddingAnalysisService:
         patches = self._select_patches(request, task_id)
         patch = patches[0]
         patch_id = str(patch["patch_id"])
+        selection_source = str(patch.get("_agent_selection_source") or "")
 
         result = self._infer_system_model(task_id, patch_id, request.time_range) if task_id in SYSTEM_MODEL_TASKS else {}
         classes = self._get_classes(task_id) if task_id in SYSTEM_MODEL_TASKS else []
@@ -93,11 +109,6 @@ class HarbinEmbeddingAnalysisService:
         class_names = [str(item.get("name") or item.get("id")) for item in classes]
         metrics = self._build_metrics(request, task_display, task_id, patch, class_names, task_summary)
         findings = self._build_findings(request, task_id, patch, class_names, task_summary)
-        patch_note = (
-            f"本次使用前端地图选择的 patch：{patch_id}。"
-            if request.selected_patch_ids
-            else f"patch 选择仍为临时确定性策略，本次样本为 {patch_id}；后续可替换为 AOI 到 patch 的空间检索。"
-        )
         return AnalysisResult(
             task=task_display,
             region="哈尔滨新区",
@@ -112,7 +123,7 @@ class HarbinEmbeddingAnalysisService:
             method_notes=[
                 f"Agent 将用户需求标准化为 region=harbin、task={task_id}、month={request.time_range}。",
                 f"本次调用哈尔滨新区 embedding-api：{self.config.base_url}。",
-                patch_note,
+                self._selection_note(selection_source, patch_id),
             ],
             limitations=[
                 "当前接入的是 patch 级系统模型推理结果，尚未按完整行政区 AOI 汇总。",
@@ -133,6 +144,7 @@ class HarbinEmbeddingAnalysisService:
                 "patch": patch,
                 "selected_patch_ids": request.selected_patch_ids,
                 "aoi": request.aoi,
+                "patch_selection_source": selection_source,
                 "classes": classes,
                 "system_model_result": result,
                 "task_summary": task_summary,
@@ -158,14 +170,29 @@ class HarbinEmbeddingAnalysisService:
         if request.selected_patch_ids:
             selected = []
             for patch_id in request.selected_patch_ids[: self.config.sample_count]:
-                patch = self._get_json(f"/regions/harbin/patches/{patch_id}")
+                try:
+                    patch = self._get_json(f"/regions/harbin/patches/{patch_id}")
+                except RuntimeError:
+                    continue
                 if self._is_usable_patch(patch, task_id, request.time_range):
+                    patch["_agent_selection_source"] = "selected_patch_month_task_valid"
                     selected.append(patch)
             if selected:
                 return selected
+            aoi_selected = self._select_patches_from_aoi(request, task_id)
+            if aoi_selected:
+                for item in aoi_selected:
+                    item["_agent_selection_source"] = "aoi_reselected_after_month_task"
+                return aoi_selected
             raise RuntimeError(
-                f"前端选择的 patch 不支持 {request.time_range} / {task_id}，请重新框选区域。"
+                f"前端选择的 patch 不支持 {request.time_range} / {task_id}，且当前 AOI 内没有找到可用 patch，请重新选择月份、任务或框选区域。"
             )
+
+        aoi_selected = self._select_patches_from_aoi(request, task_id)
+        if aoi_selected:
+            for item in aoi_selected:
+                item["_agent_selection_source"] = "aoi_month_task_search"
+            return aoi_selected
 
         patches: list[dict[str, Any]] = []
         page = 1
@@ -182,7 +209,51 @@ class HarbinEmbeddingAnalysisService:
             page += 1
         if not patches:
             raise RuntimeError(f"没有找到支持 {request.time_range} 的哈尔滨 patch。")
-        return _stable_pick(patches, f"{request.region}-{request.task}-{request.time_range}-{task_id}", self.config.sample_count)
+        selected = _stable_pick(patches, f"{request.region}-{request.task}-{request.time_range}-{task_id}", self.config.sample_count)
+        for item in selected:
+            item["_agent_selection_source"] = "global_month_task_search"
+        return selected
+
+    def _select_patches_from_aoi(self, request: ReportRequest, task_id: str) -> list[dict[str, Any]]:
+        bbox = self._aoi_bbox(request.aoi)
+        if not bbox:
+            return []
+        candidates: list[dict[str, Any]] = []
+        page = 1
+        query_base = {
+            "page_size": 100,
+            "bbox": ",".join(f"{value:.8f}" for value in bbox),
+        }
+        while True:
+            query = urlencode({**query_base, "page": page})
+            payload = self._get_json(f"/regions/harbin/patches?{query}")
+            for patch in payload.get("patches") or []:
+                if not self._is_usable_patch(patch, task_id, request.time_range):
+                    continue
+                patch_bbox = patch.get("bounds_wgs84") or []
+                score = _bbox_intersection_score([float(v) for v in patch_bbox], bbox)
+                item = dict(patch)
+                item["_agent_aoi_score"] = round(score, 6)
+                candidates.append(item)
+            if not payload.get("has_next"):
+                break
+            page += 1
+        candidates.sort(key=lambda item: (item.get("_agent_aoi_score", 0), item.get("patch_id", "")), reverse=True)
+        return candidates[: self.config.sample_count]
+
+    def _aoi_bbox(self, aoi: dict[str, Any]) -> list[float]:
+        if not isinstance(aoi, dict):
+            return []
+        coordinates = aoi.get("coordinates")
+        if aoi.get("type") != "bbox" or not isinstance(coordinates, list) or len(coordinates) != 4:
+            return []
+        try:
+            bbox = [float(value) for value in coordinates]
+        except (TypeError, ValueError):
+            return []
+        if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
+            return []
+        return bbox
 
     def _is_usable_patch(self, patch: dict[str, Any], task_id: str, time_range: str) -> bool:
         if not patch.get("has_embedding"):
@@ -307,7 +378,7 @@ class HarbinEmbeddingAnalysisService:
             MetricCard(
                 "Patch",
                 str(patch.get("patch_id") or "暂无"),
-                "前端地图选中的样本" if request.selected_patch_ids else "临时 patch 选择器命中的样本",
+                self._selection_label(str(patch.get("_agent_selection_source") or "")),
             ),
             MetricCard("可用月份", str(len(patch.get("available_months") or [])), "当前 patch 可查询的 embedding 月份数"),
             MetricCard("经纬度范围", bounds_text, "当前 patch 的 WGS84 边界"),
@@ -391,9 +462,7 @@ class HarbinEmbeddingAnalysisService:
             {
                 "title": "Patch 选择",
                 "text": (
-                    f"当前使用前端地图选择的 {patch.get('patch_id')}，报告结果与用户框选区域建立了明确关联。"
-                    if request.selected_patch_ids
-                    else f"当前采用确定性临时策略选择 {patch.get('patch_id')}，保证相同地区、任务和月份会复用同一个样本，便于联调复现。"
+                    f"当前使用 {patch.get('patch_id')}，选择方式为：{self._selection_label(str(patch.get('_agent_selection_source') or ''))}。"
                 ),
             },
         ]
@@ -411,6 +480,18 @@ class HarbinEmbeddingAnalysisService:
         if task_id == "land_use_classification":
             return "预生成专题"
         return "实时推理"
+
+    def _selection_label(self, source: str) -> str:
+        labels = {
+            "selected_patch_month_task_valid": "前端地图选中的 patch，已通过最终月份和任务校验",
+            "aoi_reselected_after_month_task": "前端候选 patch 月份或任务不匹配，已按同一 AOI 和最终条件重选",
+            "aoi_month_task_search": "按前端 AOI、最终月份和最终任务选择的 patch",
+            "global_month_task_search": "未提供 AOI 时按地区、月份和任务临时选择的 patch",
+        }
+        return labels.get(source, "最终条件校验后的 patch")
+
+    def _selection_note(self, source: str, patch_id: str) -> str:
+        return f"本次 patch 选择方式：{self._selection_label(source)}；最终使用 {patch_id}。"
 
     def _fingerprint(self, task_id: str, patch_id: str, month: str, result: dict[str, Any]) -> str:
         raw = json.dumps(

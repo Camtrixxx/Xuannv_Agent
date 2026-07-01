@@ -16,6 +16,8 @@ from agent.schemas.report import AnalysisResult, ChartAsset, MetricCard, ReportR
 
 TASK_TO_AEF = {
     "地物分类": "landcover",
+    "土地覆盖": "landcover",
+    "土地覆盖分类": "landcover",
     "水体分布": "water",
     "水体分类": "water",
     "高程地形": "dem",
@@ -72,6 +74,9 @@ class MockPatchSelector:
     """
 
     def select(self, request: ReportRequest, aef_task: str, count: int) -> list[int]:
+        selected = self._selected_patch_indices(request.selected_patch_ids, count)
+        if selected:
+            return selected
         if aef_task == "water":
             pool = WATER_PATCH_POOL
         elif aef_task == "dem":
@@ -79,6 +84,26 @@ class MockPatchSelector:
         else:
             pool = LANDCOVER_PATCH_POOL
         return _stable_pick(pool, f"{request.region}-{request.time_range}-{aef_task}", count)
+
+    def source(self, request: ReportRequest) -> str:
+        return "frontend_selected_patch" if self._selected_patch_indices(request.selected_patch_ids, 1) else "temporary_deterministic_patch_selector"
+
+    def _selected_patch_indices(self, patch_ids: list[str], count: int) -> list[int]:
+        indices: list[int] = []
+        for patch_id in patch_ids:
+            text = str(patch_id).strip()
+            if text.startswith("patch_"):
+                text = text.split("_", 1)[1]
+            try:
+                value = int(text)
+            except ValueError:
+                continue
+            if value < 0:
+                continue
+            indices.append(value)
+            if len(indices) >= count:
+                break
+        return indices
 
 
 class AEFAnalysisService:
@@ -105,6 +130,7 @@ class AEFAnalysisService:
             aef_task=aef_task,
             count=self.config.sample_count,
         )
+        selector_source = self.patch_selector.source(request)
         payload = self._infer(
             sample_indices=sample_indices,
             task=aef_task,
@@ -116,19 +142,22 @@ class AEFAnalysisService:
         summary = payload.get("summary") or {}
         items = payload.get("items") or []
         charts = self._build_charts(aef_task, payload)
-        metrics = self._build_metrics(request, aef_task, model_name, summary, items)
+        metrics = self._build_metrics(request, aef_task, model_name, summary, items, selector_source)
         findings = self._build_findings(request, aef_task, summary, items, model_name)
-        recommendations = self._build_recommendations(aef_task)
-        narrative_blocks = self._build_narratives(request, aef_task, summary)
+        recommendations = self._build_recommendations(aef_task, selector_source)
+        narrative_blocks = self._build_narratives(request, aef_task, summary, sample_indices, selector_source)
         risks = self._build_risks(aef_task)
         method_notes = [
             f"Agent 已将用户需求标准化为 task={aef_task}、region={request.region}、time_range={request.time_range}。",
-            f"区域到 patch 的映射当前由临时选择器完成，本次选中样本为 {sample_indices}；后续可替换为真实 AOI 检索服务。",
+            f"本次 patch 选择来源为 {selector_source}，选中样本为 {sample_indices}。",
             f"模型推理来自外部 AEF 服务 {self.config.base_url}，模型文件为 {model_path}。",
         ]
         confidence_notes = self._build_confidence_notes(aef_task, summary, items)
         limitations = [
-            "当前已经接入真实 AEF 推理结果，但区域到 patch 的选择仍为临时映射，尚不代表完整 AOI 覆盖。",
+            (
+                "当前已经接入真实 AEF 推理结果；如果前端提供 selected_patch_ids，则优先使用地图选中的 patch，"
+                "否则回退到临时 patch 选择器。"
+            ),
             "当前报告以 patch 级样本验证端到端闭环，正式区域报告需要补充 AOI 边界、patch 覆盖率和多样本汇总策略。",
         ]
         task_display = TASK_DISPLAY.get(aef_task, request.task)
@@ -157,7 +186,8 @@ class AEFAnalysisService:
                 "rgb_source": self.config.rgb_source,
                 "rgb_period": rgb_period,
                 "sample_indices": sample_indices,
-                "selector": "temporary_deterministic_patch_selector",
+                "selector": selector_source,
+                "selected_patch_ids": request.selected_patch_ids,
                 "summary": summary,
                 "fingerprint": self._fingerprint(payload),
             },
@@ -236,13 +266,14 @@ class AEFAnalysisService:
         model_name: str,
         summary: dict[str, Any],
         items: list[dict[str, Any]],
+        selector_source: str,
     ) -> list[MetricCard]:
         cards = [
             MetricCard("任务", TASK_DISPLAY.get(aef_task, request.task), "Agent 识别后的标准任务"),
             MetricCard("地区", request.region, "前端选择或意图解析得到的目标区域"),
             MetricCard("时间", request.time_range, "用户指定的分析月份"),
             MetricCard("模型", model_name, "实际调用的 AEF 模型版本"),
-            MetricCard("样本数", str(len(items)), "本次临时 patch 选择器返回的样本数量"),
+            MetricCard("样本数", str(len(items)), f"本次 patch 选择来源为 {selector_source}"),
         ]
         if aef_task == "landcover":
             dominant = summary.get("dominant_landcover") or {}
@@ -321,9 +352,14 @@ class AEFAnalysisService:
             "地形总览图将阴影、高程分区、坡度强度和剖面曲线组合展示，比直接查看 DEM 色带更适合面向用户解释。",
         ]
 
-    def _build_recommendations(self, aef_task: str) -> list[str]:
+    def _build_recommendations(self, aef_task: str, selector_source: str) -> list[str]:
+        patch_advice = (
+            "后续应在地图选区基础上输出 AOI 覆盖率和多 patch 汇总统计。"
+            if selector_source == "frontend_selected_patch"
+            else "后续应使用前端地图选区或真实 AOI 到 patch 的空间检索服务，并输出覆盖率。"
+        )
         common = [
-            "后续应将临时 patch 选择器替换为真实 AOI 到 patch 的空间检索服务，并输出覆盖率。",
+            patch_advice,
             "建议在正式报告中保留模型版本、样本编号、时相和图像产物，便于复核与追溯。",
         ]
         if aef_task == "landcover":
@@ -332,7 +368,19 @@ class AEFAnalysisService:
             return ["对水体边界区建议结合多时相影像复核，避免季节性水位变化造成误判。", *common]
         return ["高程产品建议重点关注误差图和坡度强度区，避免把局部重建误差直接解释为真实地形突变。", *common]
 
-    def _build_narratives(self, request: ReportRequest, aef_task: str, summary: dict[str, Any]) -> list[dict[str, str]]:
+    def _build_narratives(
+        self,
+        request: ReportRequest,
+        aef_task: str,
+        summary: dict[str, Any],
+        sample_indices: list[int],
+        selector_source: str,
+    ) -> list[dict[str, str]]:
+        selector_text = (
+            f"本次 {request.region} 的 patch 来自前端地图选区，已映射为 AEF sample_indices={sample_indices}。"
+            if selector_source == "frontend_selected_patch"
+            else f"本次 {request.region} 未提供地图选区，系统回退到临时 patch 选择器，样本为 {sample_indices}。"
+        )
         return [
             {
                 "title": "真实 AEF 调用",
@@ -340,7 +388,7 @@ class AEFAnalysisService:
             },
             {
                 "title": "空间样本说明",
-                "text": f"当前 {request.region} 的 patch 选择仍为临时映射，用于验证从自然语言到模型推理再到报告生成的完整链路。",
+                "text": selector_text,
             },
         ]
 
