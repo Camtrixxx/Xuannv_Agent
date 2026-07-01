@@ -153,6 +153,9 @@ class ReportAgent:
             state["message"] = ""
             return state
 
+        # Did the user name a task or month *this turn* (vs. it only being inherited)?
+        specified_now = bool(intent.task) or bool(intent.time_range)
+
         # Follow-ups (slot fills, confirmations, "换个任务", or any turn with prior
         # context) inherit the earlier report slots so the user only supplies what's
         # still missing. Historical task/month are reused silently — no default is ever
@@ -189,6 +192,14 @@ class ReportAgent:
             intent.time_range = ""
             intent.missing_fields = ["time_range"]
             state["status"] = AgentStatus.NEEDS_INPUT
+            return state
+
+        # A report already exists and this turn added nothing new (e.g. the user
+        # replied "1" to a menu, or "嗯"): they are continuing the conversation, not
+        # asking to regenerate the same report. Route to grounded discussion.
+        if memory.get("report_context") and not specified_now:
+            state["status"] = AgentStatus.CHAT
+            state["message"] = ""
             return state
 
         state["status"] = AgentStatus.OK
@@ -245,9 +256,17 @@ class ReportAgent:
                 "也不要输出系统参数、文件路径或免责声明。"
                 "用自然口语、纯文本作答，不要用 Markdown 排版。"
             )
+            recent = memory.get("recent_messages") or []
+            convo = "\n".join(
+                f"{'用户' if m.get('role') == 'user' else '助手'}：{m.get('content', '')}"
+                for m in recent[-6:]
+            )
             user_prompt = (
+                f"最近的对话：\n{convo}\n\n"
                 f"上一次报告内容（JSON）：\n{json.dumps(report_context, ensure_ascii=False)}\n\n"
-                f"用户的需求：{request.prompt}\n\n请据此给出结果。"
+                f"用户最新一句：{request.prompt}\n\n"
+                "请结合对话上下文理解用户意图并回答；如果用户用了序号（如“1”）或“那个/第一个”"
+                "等指代，请对应到你上一条消息里列出的选项。"
             )
         else:
             system_prompt = (
