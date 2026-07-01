@@ -91,7 +91,7 @@ Frontend
 | status | 含义 | 前端行为 |
 | --- | --- | --- |
 | `ok` | 报告已生成 | 展示 `message`，并渲染 `report` 卡片和右侧预览 |
-| `needs_input` | 缺少必要槽位，通常是月份 | 展示 `message`，等待用户继续输入 |
+| `needs_input` | 缺少必要槽位，通常是任务或月份 | 展示 `message`，等待用户继续输入 |
 | `chat` | 普通自然语言对话 | 只展示 `message`，不展示报告卡片 |
 
 ## Endpoints
@@ -131,10 +131,12 @@ Frontend
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
 | `session_id` | 否 | 会话 ID。前端应为每个聊天窗口生成稳定 ID。默认 `default` |
-| `task` | 否 | 前端选择的任务。默认 `地物分类` |
+| `task` | 否 | 前端选择的任务。可以为空；为空时 Agent 会从自然语言提取、继承上下文，或返回 `needs_input` |
 | `region` | 否 | 前端选择的地区。默认 `雅江区域` |
 | `prompt` | 是 | 用户自然语言输入 |
 | `time_range` | 否 | `YYYY-MM`，前端已知月份时可直接传 |
+| `selected_patch_ids` | 否 | 地图选择得到的 patch ID 列表，例如 `["patch_000020"]` |
+| `aoi` | 否 | 地图框选范围，推荐 `{ "type": "bbox", "coordinates": [minLng, minLat, maxLng, maxLat] }` |
 
 哈尔滨请求示例：
 
@@ -256,6 +258,8 @@ absolute_image_url = AGENT_BASE_URL + response.analysis.charts[0].url
 
 地图选区到 patch 的检索接口。前端框选地图后，把 bbox 交给 Agent，由 Agent 代理查询区域 patch 服务并返回候选 patch。
 
+`task` 和 `time_range` 都可以先传空字符串。这样前端可以支持“先框选地图定位 patch，再让用户选择任务/输入月份”的交互。若传入任务或月份，后端会尽量提前过滤出支持该任务/月份的 patch。
+
 当前支持情况：
 
 | 地区 | 支持情况 |
@@ -269,8 +273,8 @@ absolute_image_url = AGENT_BASE_URL + response.analysis.charts[0].url
 ```json
 {
   "region": "哈尔滨新区",
-  "task": "土地利用分类",
-  "time_range": "2025-09",
+  "task": "",
+  "time_range": "",
   "bbox": [126.5, 45.74, 126.57, 45.765],
   "limit": 10
 }
@@ -331,6 +335,7 @@ absolute_image_url = AGENT_BASE_URL + response.analysis.charts[0].url
   "region": "哈尔滨新区",
   "task": "土地利用分类",
   "prompt": "给我一份去年九月份哈尔滨新区土地利用分类报告",
+  "time_range": "",
   "selected_patch_ids": ["patch_000002"],
   "aoi": {
     "type": "bbox",

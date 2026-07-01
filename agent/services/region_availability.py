@@ -30,8 +30,19 @@ def _months_between(start: str, end: str) -> list[str]:
 
 # Yajiang AEF: quarterly imagery 2023Q1..2026Q1 -> every month in that span.
 YAJIANG_MONTHS = _months_between("2023-01", "2026-03")
-# Harbin embedding-api: explicit available_months from the API docs.
-HARBIN_MONTHS = ["2025-04", "2025-06", "2025-08", "2025-09", "2025-10"]
+# Harbin embedding-api: explicit available_months from live patch metadata/API docs.
+HARBIN_MONTHS = [
+    "2025-04",
+    "2025-06",
+    "2025-08",
+    "2025-09",
+    "2025-10",
+    "2026-01",
+    "2026-02",
+    "2026-03",
+    "2026-04",
+    "2026-05",
+]
 # Haidian embedding-api v1: 202512..202605 per the API docs.
 HAIDIAN_MONTHS = _months_between("2025-12", "2026-05")
 
@@ -43,7 +54,7 @@ REGION_MONTHS: dict[str, list[str]] = {
 
 REGION_COVERAGE_HINT: dict[str, str] = {
     "yajiang": "雅江区域目前可分析 2023 年 1 月至 2026 年 3 月（按季度更新）",
-    "harbin": "哈尔滨新区目前可分析 2025 年 4、6、8、9、10 月",
+    "harbin": "哈尔滨新区目前可分析 2025 年 4、6、8、9、10 月，以及 2026 年 1 至 5 月",
     "haidian": "北京市海淀区目前可分析 2025 年 12 月至 2026 年 5 月",
 }
 

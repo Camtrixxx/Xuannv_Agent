@@ -27,8 +27,10 @@ def test_yajiang_quarterly_coverage():
 def test_harbin_coverage():
     assert is_month_available("哈尔滨新区", "2025-04")
     assert is_month_available("哈尔滨新区", "2025-10")
+    assert is_month_available("哈尔滨新区", "2026-01")
+    assert is_month_available("哈尔滨新区", "2026-05")
     assert not is_month_available("哈尔滨新区", "2025-05")
-    assert not is_month_available("哈尔滨新区", "2026-01")
+    assert not is_month_available("哈尔滨新区", "2026-06")
 
 
 def test_haidian_coverage():
