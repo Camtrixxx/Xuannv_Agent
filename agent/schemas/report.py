@@ -108,6 +108,10 @@ class AnalysisResult:
     generated_at: str = ""
     aef_payload: dict[str, Any] = field(default_factory=dict)
     charts: list[ChartAsset] = field(default_factory=list)
+    # Optional structured distribution surfaced in the report as a clean table
+    # (e.g. land-cover class shares). Each row: {label, ratio, value?}.
+    data_table: list[dict[str, Any]] = field(default_factory=list)
+    data_table_title: str = ""
 
 
 @dataclass(slots=True)

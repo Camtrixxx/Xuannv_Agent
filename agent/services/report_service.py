@@ -4,17 +4,40 @@ import html
 import hashlib
 import json
 import re
-from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
 from agent.config import ReportConfig
-from agent.schemas.report import AnalysisResult, ReportArtifact, ReportRequest
+from agent.schemas.report import AnalysisResult, ChartAsset, MetricCard, ReportArtifact, ReportRequest
 from agent.services.common import extract_json_object
 from agent.services.llm_provider import DeepSeekProvider, LLMProvider
 
 
-REPORT_TEMPLATE_VERSION = "agent-report-v4"
+REPORT_TEMPLATE_VERSION = "agent-report-v5"
+
+# Metric cards that are metadata/plumbing rather than business findings. These are
+# already conveyed by the header chips, so we keep them out of the metric grid.
+_META_METRIC_LABELS = {
+    "任务",
+    "地区",
+    "时间",
+    "模型",
+    "样本数",
+    "Patch",
+    "可用月份",
+    "经纬度范围",
+    "专题 ID",
+    "专题ID",
+    "接口状态",
+    "结果尺寸",
+}
+
+_SOURCE_DISPLAY = {
+    "aef_inference": "雅江遥感分析模型",
+    "harbin_embedding_api": "哈尔滨在线专题服务",
+    "haidian_embedding_api": "海淀在线专题服务",
+    "prototype": "遥感分析流程",
+}
 
 
 class ReportService:
@@ -34,13 +57,15 @@ class ReportService:
         slug = self._slug(self._report_identity(request, analysis))
         html_path = self.report_dir / f"{slug}.html"
         md_path = self.report_dir / f"{slug}.md"
+        metrics = self._business_metrics(analysis)
+
         if self.config.reuse_existing and self._can_reuse(html_path, md_path):
-            abstract = self._read_existing_abstract(md_path) or self._fallback_abstract(request, analysis)
+            abstract = self._read_existing_abstract(md_path) or self._fallback_summary(request, analysis)
             return ReportArtifact(
                 title=title,
                 abstract=abstract,
                 sections=[],
-                metrics=analysis.metrics,
+                metrics=metrics,
                 charts=analysis.charts,
                 html_url=f"/reports/{html_path.name}",
                 markdown_url=f"/reports/{md_path.name}",
@@ -49,46 +74,20 @@ class ReportService:
                 generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             )
 
-        generated = self._write_report_content(request, analysis)
-        abstract = generated["abstract"]
+        content = self._generate_content(request, analysis, metrics)
         llm_status = getattr(self.llm, "last_status", "template")
         llm_provider = "deepseek" if llm_status == "ok" else f"template:{llm_status}"
-        sections = [
-            {
-                "heading": "一、分析概览",
-                "body": abstract,
-            },
-            {
-                "heading": "二、主要发现",
-                "items": generated["findings"],
-            },
-            {
-                "heading": "三、风险与关注点",
-                "items": generated["risks"],
-            },
-            {
-                "heading": "四、建议与后续工作",
-                "items": generated["recommendations"],
-            },
-            {
-                "heading": "五、方法说明",
-                "items": generated["method_notes"],
-            },
-            {
-                "heading": "六、局限性说明",
-                "items": generated["limitations"],
-            },
-        ]
 
-        html_path.write_text(self._render_html(title, abstract, sections, analysis), encoding="utf-8")
-        md_path.write_text(self._render_markdown(title, abstract, sections, analysis), encoding="utf-8")
+        html_path.write_text(self._render_html(title, content, analysis, metrics), encoding="utf-8")
+        md_path.write_text(self._render_markdown(title, content, analysis, metrics), encoding="utf-8")
         self._prune_reports()
 
+        sections = [{"heading": block["title"], "body": block["text"]} for block in content["analysis"]]
         return ReportArtifact(
             title=title,
-            abstract=abstract,
+            abstract=content["summary"],
             sections=sections,
-            metrics=analysis.metrics,
+            metrics=metrics,
             charts=analysis.charts,
             html_url=f"/reports/{html_path.name}",
             markdown_url=f"/reports/{md_path.name}",
@@ -97,72 +96,104 @@ class ReportService:
             debug={"llm_status": llm_status, "slug": slug},
         )
 
-    def _write_report_content(self, request: ReportRequest, analysis: AnalysisResult) -> dict[str, list[str] | str]:
+    # ------------------------------------------------------------------ content
+
+    def _generate_content(self, request: ReportRequest, analysis: AnalysisResult, metrics: list[MetricCard]) -> dict:
         system_prompt = (
-            "你是遥感分析报告助手。请基于给定结构化分析结果生成中文图文报告内容。"
-            "必须忠于输入数据，不得编造未提供的指标。只输出 JSON，不要输出 Markdown。"
+            "你是一位资深遥感分析师，正在为业务和管理读者撰写遥感专题分析报告。"
+            "写作要求：结论先行，层次分明，语言专业但通俗易懂；聚焦“数据说明了什么、"
+            "对业务意味着什么、下一步该怎么做”。不要罗列系统参数、接口字段或免责声明，"
+            "不要出现模型文件、服务地址、patch 编号等技术细节。必须忠于给定数据，"
+            "严禁编造未提供的数字、坐标或事件。只输出 JSON，不要输出多余文字。"
         )
-        user_prompt = json.dumps(
+        payload = json.dumps(
             {
-                "用户需求": request.prompt,
                 "区域": request.region,
-                "任务": request.task,
+                "任务": analysis.task,
                 "时间": request.time_range,
-                "分析摘要": analysis.summary,
-                "指标": [asdict(m) for m in analysis.metrics],
-                "发现": analysis.findings,
-                "建议": analysis.recommendations,
-                "专题解读": analysis.narrative_blocks,
-                "AEF标准化调用字段": analysis.aef_payload,
+                "分析摘要线索": analysis.summary,
+                "关键指标": [{"名称": m.label, "数值": m.value} for m in metrics],
+                "数据分布": [
+                    {"类别": row.get("label"), "占比": row.get("ratio")}
+                    for row in analysis.data_table
+                ],
+                "发现线索": analysis.findings,
+                "风险线索": analysis.risks,
+                "图表": [{"标题": c.title, "说明": c.caption} for c in analysis.charts],
                 "输出格式": {
-                    "abstract": "一段 260-380 字的专业执行摘要，说明区域、时间、任务、关键结论和应用价值",
-                    "findings": "5-7 条主要发现，每条 50-110 字，覆盖空间格局、主导类型、异常/关注点、指标解释",
-                    "risks": "3-5 条风险与关注点，每条 45-100 字",
-                    "recommendations": "4-6 条建议，每条 45-100 字，偏业务行动建议",
-                    "method_notes": "3-5 条方法说明，写时相、AOI、模型/指标解释，不要出现 mock 字样",
-                    "limitations": "2-4 条局限性说明，客观说明当前原型边界，不要出现 mock 字样",
+                    "summary": "结论先行的执行摘要，160-240字，讲清区域、时间、任务的核心结论与业务价值",
+                    "highlights": "3-5 条核心要点，每条一句话、可独立成立，最重要的结论排在最前",
+                    "analysis": "2-4 个深度解读小节；每节为 {title: 小标题, text: 180-280字的详实分析}，"
+                    "覆盖空间格局、主导特征、值得关注的信号、结果可靠性等",
+                    "recommendations": "3-5 条可执行的建议或风险提醒，务实、面向行动",
                 },
-                "禁止": ["不要在报告正文出现 mock、占位、模拟、原型等字样", "不要编造输入中没有的具体面积、坐标或真实灾害事件"],
+                "禁止": [
+                    "不要出现模型文件路径、服务地址、patch 编号、接口字段、坐标系等系统内部信息",
+                    "不要出现 mock、占位、模拟、原型等字样",
+                    "不要编造输入中没有的具体数字、坐标或真实事件",
+                ],
             },
             ensure_ascii=False,
             indent=2,
         )
-        llm_text = self.llm.complete(system_prompt, user_prompt)
-        if llm_text:
-            parsed = extract_json_object(llm_text)
+        text = self.llm.complete(system_prompt, payload)
+        if text:
+            parsed = extract_json_object(text)
             if parsed:
-                return {
-                    "abstract": str(parsed.get("abstract") or self._fallback_abstract(request, analysis)),
-                    "findings": self._list_or_default(parsed.get("findings"), analysis.findings),
-                    "risks": self._list_or_default(parsed.get("risks"), analysis.risks),
-                    "recommendations": self._list_or_default(parsed.get("recommendations"), analysis.recommendations),
-                    "method_notes": self._list_or_default(
-                        parsed.get("method_notes"),
-                        analysis.method_notes,
-                    ),
-                    "limitations": self._list_or_default(
-                        parsed.get("limitations"),
-                        analysis.limitations,
-                    ),
-                }
+                analysis_blocks = self._clean_blocks(parsed.get("analysis"))
+                if analysis_blocks:
+                    return {
+                        "summary": str(parsed.get("summary") or self._fallback_summary(request, analysis)),
+                        "highlights": self._list_or_default(parsed.get("highlights"), analysis.findings)[:5],
+                        "analysis": analysis_blocks,
+                        "recommendations": self._list_or_default(
+                            parsed.get("recommendations"), self._merged_actions(analysis)
+                        )[:6],
+                    }
         return self._fallback_content(request, analysis)
 
-    def _fallback_content(self, request: ReportRequest, analysis: AnalysisResult) -> dict[str, list[str] | str]:
+    def _clean_blocks(self, value) -> list[dict[str, str]]:
+        blocks: list[dict[str, str]] = []
+        if not isinstance(value, list):
+            return blocks
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            body = str(item.get("text") or "").strip()
+            if title and body:
+                blocks.append({"title": title, "text": body})
+        return blocks[:4]
+
+    def _fallback_content(self, request: ReportRequest, analysis: AnalysisResult) -> dict:
+        blocks = [{"title": "分析解读", "text": analysis.summary or self._fallback_summary(request, analysis)}]
+        findings = [f for f in analysis.findings if "Agent" not in f and "标准化" not in f]
+        if findings:
+            blocks.append({"title": "主要发现", "text": " ".join(findings[:4])})
         return {
-            "abstract": self._fallback_abstract(request, analysis),
-            "findings": analysis.findings,
-            "risks": analysis.risks,
-            "recommendations": analysis.recommendations,
-            "method_notes": analysis.method_notes,
-            "limitations": analysis.limitations,
+            "summary": self._fallback_summary(request, analysis),
+            "highlights": (findings or analysis.findings)[:5],
+            "analysis": blocks,
+            "recommendations": self._merged_actions(analysis)[:6],
         }
 
-    def _fallback_abstract(self, request: ReportRequest, analysis: AnalysisResult) -> str:
+    def _fallback_summary(self, request: ReportRequest, analysis: AnalysisResult) -> str:
+        base = analysis.summary.strip()
+        if base:
+            return base
         return (
-            f"本报告围绕{request.region}在{request.time_range}期间的{request.task}需求展开，"
-            f"综合区域统计、专题指标与图表信息形成分析结论。{analysis.summary}"
-            "报告重点关注主导地表类型、空间格局特征、结果可信度、风险提示和后续行动建议。"
+            f"本报告聚焦{request.region}在{request.time_range}的{analysis.task}分析，"
+            "综合关键指标、结果图与数据分布，给出主导特征、空间格局和后续建议。"
         )
+
+    def _merged_actions(self, analysis: AnalysisResult) -> list[str]:
+        actions = list(analysis.recommendations)
+        for risk in analysis.risks:
+            actions.append(f"注意：{risk}")
+        return actions
+
+    def _business_metrics(self, analysis: AnalysisResult) -> list[MetricCard]:
+        return [m for m in analysis.metrics if m.label not in _META_METRIC_LABELS]
 
     def _list_or_default(self, value, default: list[str]) -> list[str]:
         if not isinstance(value, list):
@@ -170,54 +201,66 @@ class ReportService:
         items = [str(item).strip() for item in value if str(item).strip()]
         return items or default
 
+    # ------------------------------------------------------------------- render
+
     def _render_html(
         self,
         title: str,
-        abstract: str,
-        sections: list[dict],
+        content: dict,
         analysis: AnalysisResult,
+        metrics: list[MetricCard],
     ) -> str:
-        metric_html = "\n".join(
-            f"""<div class="metric"><span>{html.escape(m.label)}</span><strong>{html.escape(m.value)}</strong><small>{html.escape(m.description)}</small></div>"""
-            for m in analysis.metrics
+        chips = "".join(
+            f"<span>{html.escape(text)}</span>"
+            for text in (analysis.region, analysis.task, analysis.time_range)
+            if text
         )
-        chart_html = "\n".join(
-            f"""<figure><img src="{html.escape(c.url)}" alt="{html.escape(c.title)}"><figcaption>{html.escape(c.caption)}</figcaption></figure>"""
+        highlights_html = "".join(f"<li>{html.escape(item)}</li>" for item in content["highlights"])
+        metric_html = "".join(
+            f"""<div class="metric"><strong>{html.escape(m.value)}</strong><span>{html.escape(m.label)}</span>"""
+            + (f"<small>{html.escape(m.description)}</small>" if m.description else "")
+            + "</div>"
+            for m in metrics
+        )
+        charts_html = "".join(
+            f"""<figure><img src="{html.escape(c.url)}" alt="{html.escape(c.title)}">"""
+            f"""<figcaption><b>{html.escape(c.title)}</b>{html.escape(c.caption)}</figcaption></figure>"""
             for c in analysis.charts
         )
-        narrative_html = "\n".join(
-            f"""<article class="narrative"><h3>{html.escape(block.get("title", ""))}</h3><p>{html.escape(block.get("text", ""))}</p></article>"""
-            for block in analysis.narrative_blocks
+        table_html = self._distribution_html(analysis)
+        analysis_html = "".join(
+            f"""<section class="block"><h3>{html.escape(b["title"])}</h3><p>{html.escape(b["text"])}</p></section>"""
+            for b in content["analysis"]
         )
-        confidence_html = "\n".join(f"<li>{html.escape(item)}</li>" for item in analysis.confidence_notes)
-        payload_rows = "\n".join(
-            f"<tr><th>{html.escape(str(k))}</th><td>{html.escape(json.dumps(v, ensure_ascii=False))}</td></tr>"
-            for k, v in analysis.aef_payload.items()
-        )
-        section_html = []
-        for section in sections:
-            if "items" in section:
-                items = "".join(f"<li>{html.escape(item)}</li>" for item in section["items"])
-                body = f"<ul>{items}</ul>"
-            else:
-                body = f"<p>{html.escape(section['body'])}</p>"
-            section_html.append(f"<section><h2>{html.escape(section['heading'])}</h2>{body}</section>")
+        rec_html = "".join(f"<li>{html.escape(item)}</li>" for item in content["recommendations"])
+        generated_at = (analysis.generated_at or datetime.now(timezone.utc).isoformat(timespec="seconds"))[:10]
+        source = _SOURCE_DISPLAY.get(analysis.data_source, "遥感分析模型")
 
-        generated_at = html.escape(analysis.generated_at or datetime.now(timezone.utc).isoformat(timespec="seconds"))
-        source_labels = {
-            "prototype": "流程验证数据",
-            "aef_inference": "真实 AEF 推理",
-            "harbin_embedding_api": "哈尔滨在线专题 API",
-            "haidian_embedding_api": "海淀在线专题 API",
-        }
-        data_source = source_labels.get(analysis.data_source, analysis.data_source)
-        source_notes = {
-            "prototype": "说明：当前报告结构已按真实 AEF 接入设计；在正式模型接入前，指标用于流程验证和版式联调。",
-            "aef_inference": "说明：当前报告已调用真实 AEF 推理服务；区域到 patch 的映射策略见标准化 AEF 调用字段。",
-            "harbin_embedding_api": "说明：当前报告已调用哈尔滨在线 embedding-api；patch 选择方式见标准化调用字段。",
-            "haidian_embedding_api": "说明：当前报告已调用海淀在线 embedding-api；专题结果来自 patch 级结果图接口。",
-        }
-        source_note = source_notes.get(analysis.data_source, "说明：当前报告已调用区域模型服务。")
+        data_section = ""
+        if charts_html or table_html:
+            data_section = f"""
+    <section class="card" id="data">
+      <h2>结果图与数据</h2>
+      <div class="figures">{charts_html}</div>
+      {table_html}
+    </section>"""
+
+        highlights_section = ""
+        if highlights_html:
+            highlights_section = f"""
+    <section class="card highlights" id="highlights">
+      <h2>核心要点</h2>
+      <ul>{highlights_html}</ul>
+    </section>"""
+
+        metrics_section = ""
+        if metric_html:
+            metrics_section = f"""
+    <section id="metrics">
+      <h2 class="section-title">关键指标</h2>
+      <div class="metrics">{metric_html}</div>
+    </section>"""
+
         return f"""<!doctype html>
 <!-- {REPORT_TEMPLATE_VERSION} -->
 <html lang="zh-CN">
@@ -226,110 +269,141 @@ class ReportService:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{html.escape(title)}</title>
   <style>
-    body {{ margin: 0; background: #eef2f5; color: #1f2937; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }}
-    main {{ max-width: 1060px; margin: 0 auto; padding: 34px 20px 58px; }}
-    header {{ background: #ffffff; border: 1px solid #dbe3ea; border-radius: 8px; padding: 28px; margin-bottom: 16px; }}
-    .eyebrow {{ color: #2563eb; font-weight: 700; font-size: 13px; margin-bottom: 10px; }}
-    h1 {{ margin: 0 0 12px; font-size: 34px; letter-spacing: 0; }}
-    .lead {{ margin: 0; color: #374151; line-height: 1.9; font-size: 16px; }}
-    .meta {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }}
-    .meta span {{ border: 1px solid #dbe3ea; border-radius: 999px; padding: 6px 11px; color: #4b5563; background: #f8fafc; font-size: 13px; }}
-    .metrics {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 16px 0; }}
-    .metric {{ background: #fff; border: 1px solid #dbe3ea; border-radius: 8px; padding: 14px; min-height: 98px; }}
-    .metric span, .metric small {{ display: block; color: #6b7280; font-size: 12px; }}
-    .metric strong {{ display: block; margin: 7px 0; font-size: 19px; }}
-    .grid {{ display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 14px; align-items: start; }}
-    section, figure, .narrative, .payload, .confidence {{ background: #fff; border: 1px solid #dbe3ea; border-radius: 8px; padding: 18px; margin: 14px 0; }}
-    h2 {{ margin: 0 0 12px; font-size: 20px; }}
-    h3 {{ margin: 0 0 8px; font-size: 16px; }}
-    p, li {{ line-height: 1.8; }}
-    ul {{ padding-left: 20px; }}
-    img {{ width: 100%; max-height: 460px; object-fit: contain; }}
-    figcaption {{ margin-top: 8px; color: #6b7280; font-size: 13px; }}
-    table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
-    th, td {{ border-top: 1px solid #e5e7eb; padding: 8px; vertical-align: top; text-align: left; }}
-    th {{ width: 130px; color: #4b5563; }}
-    .note {{ color: #6b7280; font-size: 12px; margin-top: 10px; }}
-    .toc {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }}
-    .toc a {{ color: #2563eb; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 999px; padding: 6px 10px; text-decoration: none; font-size: 13px; font-weight: 700; }}
-    .source {{ color: #6b7280; font-size: 12px; margin-top: 12px; }}
-    @media (max-width: 860px) {{ .metrics {{ grid-template-columns: repeat(2, 1fr); }} .grid {{ grid-template-columns: 1fr; }} }}
+    :root {{
+      --bg:#f5f7fa; --card:#fff; --ink:#1f2328; --muted:#6b7280; --line:#e6e9ee;
+      --primary:#2563eb; --primary-soft:#eef4ff; --accent:#0f766e; --shadow:0 12px 34px rgba(15,23,42,.08);
+    }}
+    * {{ box-sizing:border-box; }}
+    body {{ margin:0; color:var(--ink); background:var(--bg);
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif; line-height:1.85; }}
+    main {{ max-width:920px; margin:0 auto; padding:32px 22px 72px; }}
+    .hero {{ background:linear-gradient(135deg,#1e3a8a,#2563eb); color:#fff; border-radius:16px; padding:32px 30px;
+      box-shadow:var(--shadow); }}
+    .hero .eyebrow {{ font-size:13px; letter-spacing:.14em; opacity:.85; font-weight:700; }}
+    .hero h1 {{ margin:12px 0 16px; font-size:27px; line-height:1.35; }}
+    .chips {{ display:flex; flex-wrap:wrap; gap:8px; }}
+    .chips span {{ background:rgba(255,255,255,.16); border:1px solid rgba(255,255,255,.28); border-radius:999px;
+      padding:5px 13px; font-size:13px; font-weight:600; }}
+    .lead {{ background:var(--card); border:1px solid var(--line); border-left:4px solid var(--primary);
+      border-radius:12px; padding:20px 24px; margin:18px 0; font-size:16px; color:#374151; box-shadow:var(--shadow); }}
+    h2.section-title {{ font-size:20px; margin:34px 0 14px; }}
+    .card {{ background:var(--card); border:1px solid var(--line); border-radius:14px; padding:22px 24px;
+      margin:18px 0; box-shadow:var(--shadow); }}
+    .card h2 {{ margin:0 0 14px; font-size:20px; }}
+    .highlights ul {{ margin:0; padding:0; list-style:none; display:grid; gap:10px; }}
+    .highlights li {{ position:relative; padding-left:28px; }}
+    .highlights li::before {{ content:"▍"; position:absolute; left:6px; color:var(--primary); }}
+    .metrics {{ display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }}
+    .metric {{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px;
+      box-shadow:var(--shadow); }}
+    .metric strong {{ display:block; font-size:23px; color:var(--primary); }}
+    .metric span {{ display:block; margin-top:4px; font-size:13px; font-weight:600; }}
+    .metric small {{ display:block; margin-top:6px; color:var(--muted); font-size:12px; line-height:1.5; }}
+    .figures {{ display:grid; gap:16px; }}
+    figure {{ margin:0; }}
+    figure img {{ width:100%; border-radius:10px; border:1px solid var(--line); }}
+    figcaption {{ margin-top:8px; color:var(--muted); font-size:13px; }}
+    figcaption b {{ display:block; color:var(--ink); font-size:14px; margin-bottom:2px; }}
+    .dist {{ margin-top:20px; display:grid; gap:10px; }}
+    .dist .row {{ display:grid; grid-template-columns:110px 1fr 62px; align-items:center; gap:10px; font-size:14px; }}
+    .dist .bar {{ background:#eef2f7; border-radius:999px; height:12px; overflow:hidden; }}
+    .dist .bar i {{ display:block; height:100%; background:linear-gradient(90deg,#2563eb,#0f766e); border-radius:999px; }}
+    .dist .pct {{ text-align:right; color:var(--muted); font-variant-numeric:tabular-nums; }}
+    .block h3 {{ margin:0 0 8px; font-size:16px; color:var(--accent); }}
+    .block p {{ margin:0; color:#374151; }}
+    .block + .block {{ margin-top:18px; border-top:1px dashed var(--line); padding-top:18px; }}
+    .rec ol {{ margin:0; padding-left:22px; display:grid; gap:10px; }}
+    .footer {{ margin-top:30px; color:var(--muted); font-size:12.5px; text-align:center; }}
+    @media (max-width:720px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .dist .row {{ grid-template-columns:84px 1fr 52px; }} }}
   </style>
 </head>
 <body>
   <main>
-    <header>
+    <header class="hero">
       <div class="eyebrow">遥感专题分析报告</div>
       <h1>{html.escape(title)}</h1>
-      <p class="lead">{html.escape(abstract)}</p>
-      <div class="meta">
-        <span>区域：{html.escape(analysis.region)}</span>
-        <span>任务：{html.escape(analysis.task)}</span>
-        <span>时间：{html.escape(analysis.time_range)}</span>
-        <span>数据：{html.escape(data_source)}</span>
-        <span>生成：{generated_at}</span>
-      </div>
-      <p class="source">{html.escape(source_note)}</p>
+      <div class="chips">{chips}</div>
     </header>
-    <nav class="toc">
-      <a href="#metrics">关键指标</a>
-      <a href="#charts">图表解读</a>
-      <a href="#confidence">可信度说明</a>
-      <a href="#sections">报告正文</a>
-      <a href="#payload">AEF 字段</a>
-    </nav>
-    <div class="metrics" id="metrics">{metric_html}</div>
-    <div class="grid" id="charts">
-      <div>{chart_html}</div>
-      <div>{narrative_html}</div>
-    </div>
-    <section class="confidence" id="confidence">
-      <h2>可信度说明</h2>
-      <ul>{confidence_html}</ul>
+    <p class="lead">{html.escape(content["summary"])}</p>
+{highlights_section}
+{metrics_section}
+{data_section}
+    <section id="analysis">
+      <h2 class="section-title">深度解读</h2>
+      <div class="card">{analysis_html}</div>
     </section>
-    <div id="sections">{''.join(section_html)}</div>
-    <section class="payload" id="payload">
-      <h2>七、标准化 AEF 调用字段</h2>
-      <table>{payload_rows}</table>
-      <p class="note">说明：该字段表用于后续接入真实 AEF 分析服务，报告正文不依赖用户手工整理参数。</p>
+    <section class="card rec" id="rec">
+      <h2>建议与提醒</h2>
+      <ol>{rec_html}</ol>
     </section>
+    <p class="footer">本报告由遥感报告助手自动生成 · 数据来源：{html.escape(source)} · 生成日期 {html.escape(generated_at)}</p>
   </main>
 </body>
 </html>
 """
 
+    def _distribution_html(self, analysis: AnalysisResult) -> str:
+        if not analysis.data_table:
+            return ""
+        rows = "".join(
+            f"""<div class="row"><span>{html.escape(str(r.get('label')))}</span>"""
+            f"""<span class="bar"><i style="width:{max(1, round(float(r.get('ratio') or 0) * 100)):d}%"></i></span>"""
+            f"""<span class="pct">{float(r.get('ratio') or 0) * 100:.1f}%</span></div>"""
+            for r in analysis.data_table
+        )
+        title = html.escape(analysis.data_table_title or "数据分布")
+        return f"""<h3 style="margin:22px 0 4px;font-size:15px;">{title}</h3><div class="dist">{rows}</div>"""
+
     def _render_markdown(
         self,
         title: str,
-        abstract: str,
-        sections: list[dict],
+        content: dict,
         analysis: AnalysisResult,
+        metrics: list[MetricCard],
     ) -> str:
-        lines = [f"<!-- {REPORT_TEMPLATE_VERSION} -->", "", f"# {title}", "", abstract, "", "## 关键指标", ""]
-        for metric in analysis.metrics:
-            lines.append(f"- **{metric.label}**：{metric.value}。{metric.description}")
-        lines.append("")
-        for chart in analysis.charts:
-            lines.extend([f"![{chart.title}]({chart.url})", "", chart.caption, ""])
-        lines.extend(["## 专题解读", ""])
-        for block in analysis.narrative_blocks:
-            lines.extend([f"### {block.get('title', '')}", "", str(block.get("text", "")), ""])
-        for section in sections:
-            lines.extend([f"## {section['heading']}", ""])
-            if "items" in section:
-                lines.extend(f"- {item}" for item in section["items"])
-            else:
-                lines.append(section["body"])
+        lines = [f"<!-- {REPORT_TEMPLATE_VERSION} -->", "", f"# {title}", ""]
+        chips = " · ".join(t for t in (analysis.region, analysis.task, analysis.time_range) if t)
+        if chips:
+            lines += [f"**{chips}**", ""]
+        lines += [content["summary"], ""]
+
+        if content["highlights"]:
+            lines += ["## 核心要点", ""]
+            lines += [f"- {item}" for item in content["highlights"]]
             lines.append("")
-        lines.extend(["## 可信度说明", ""])
-        lines.extend(f"- {item}" for item in analysis.confidence_notes)
+
+        if metrics:
+            lines += ["## 关键指标", ""]
+            for m in metrics:
+                suffix = f"（{m.description}）" if m.description else ""
+                lines.append(f"- **{m.label}**：{m.value}{suffix}")
+            lines.append("")
+
+        if analysis.charts or analysis.data_table:
+            lines += ["## 结果图与数据", ""]
+            for c in analysis.charts:
+                lines += [f"![{c.title}]({c.url})", "", f"*{c.caption}*", ""]
+            if analysis.data_table:
+                lines += [f"### {analysis.data_table_title or '数据分布'}", "", "| 类别 | 占比 |", "| --- | --- |"]
+                for r in analysis.data_table:
+                    lines.append(f"| {r.get('label')} | {float(r.get('ratio') or 0) * 100:.1f}% |")
+                lines.append("")
+
+        lines += ["## 深度解读", ""]
+        for b in content["analysis"]:
+            lines += [f"### {b['title']}", "", b["text"], ""]
+
+        lines += ["## 建议与提醒", ""]
+        for i, item in enumerate(content["recommendations"], 1):
+            lines.append(f"{i}. {item}")
         lines.append("")
-        lines.extend(["## 七、标准化 AEF 调用字段", ""])
-        lines.append("```json")
-        lines.append(json.dumps(analysis.aef_payload, ensure_ascii=False, indent=2))
-        lines.append("```")
-        lines.append("")
+
+        source = _SOURCE_DISPLAY.get(analysis.data_source, "遥感分析模型")
+        generated_at = (analysis.generated_at or datetime.now(timezone.utc).isoformat(timespec="seconds"))[:10]
+        lines += ["---", f"*本报告由遥感报告助手自动生成 · 数据来源：{source} · 生成日期 {generated_at}*", ""]
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------ helpers
 
     def _slug(self, text: str) -> str:
         digest = re.sub(r"[^0-9a-zA-Z_-]+", "-", text).strip("-")
@@ -353,7 +427,7 @@ class ReportService:
             return ""
         for line in lines[1:]:
             stripped = line.strip()
-            if stripped and not stripped.startswith("#"):
+            if stripped and not stripped.startswith("#") and not stripped.startswith("**"):
                 return stripped
         return ""
 

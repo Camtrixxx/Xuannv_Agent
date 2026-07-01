@@ -161,12 +161,15 @@ class AEFAnalysisService:
             "当前报告以 patch 级样本验证端到端闭环，正式区域报告需要补充 AOI 边界、patch 覆盖率和多样本汇总策略。",
         ]
         task_display = TASK_DISPLAY.get(aef_task, request.task)
+        data_table, data_table_title = self._build_distribution(aef_task, summary)
         return AnalysisResult(
             task=task_display,
             region=request.region,
             time_range=request.time_range,
             headline=f"{request.region}{request.time_range}{task_display}遥感分析",
             summary=self._summary_text(request, aef_task, summary),
+            data_table=data_table,
+            data_table_title=data_table_title,
             metrics=metrics,
             findings=findings,
             recommendations=recommendations,
@@ -196,6 +199,25 @@ class AEFAnalysisService:
 
     def _normalize_task(self, task: str) -> str:
         return TASK_TO_AEF.get(task, "landcover")
+
+    def _build_distribution(self, aef_task: str, summary: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+        """Surface the land-cover class distribution as a clean table."""
+        if aef_task != "landcover":
+            return [], ""
+        rows = []
+        for item in summary.get("landcover_distribution") or []:
+            ratio = item.get("ratio")
+            if ratio is None:
+                continue
+            rows.append(
+                {
+                    "label": item.get("label_zh") or item.get("label") or "未知类别",
+                    "ratio": float(ratio),
+                    "value": item.get("pixels"),
+                }
+            )
+        rows.sort(key=lambda r: r["ratio"], reverse=True)
+        return rows, "地物类型分布"
 
     def _infer(self, *, sample_indices: list[int], task: str, rgb_period: str) -> dict[str, Any]:
         url = urljoin(self.config.base_url.rstrip("/") + "/", "api/infer")
