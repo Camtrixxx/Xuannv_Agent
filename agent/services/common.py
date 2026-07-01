@@ -31,6 +31,28 @@ def bbox_intersection_score(a: list[float], b: list[float]) -> float:
     return float(inter / min(patch_area, query_area))
 
 
+def strip_markdown(text: str) -> str:
+    """Turn LLM Markdown into clean plain text for chat bubbles.
+
+    Chat is rendered as plain text, so ``**bold**``/``# heading``/``- item``
+    would otherwise show their literal markers. Bullets become "• ", headings
+    and emphasis/code markers are removed, and numbered lists are kept as-is.
+    """
+    if not text:
+        return text
+    out_lines = []
+    for line in text.split("\n"):
+        s = re.sub(r"^\s{0,3}#{1,6}\s+", "", line)          # headings
+        s = re.sub(r"^(\s*)[-*+]\s+", r"\1• ", s)            # bullets -> •
+        s = s.replace("**", "").replace("__", "")            # bold markers
+        s = re.sub(r"\*([^*\n]+?)\*", r"\1", s)              # *italic*
+        s = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"\1", s)   # _italic_
+        s = s.replace("`", "")                                # inline code
+        out_lines.append(s)
+    result = "\n".join(out_lines)
+    return re.sub(r"\n{3,}", "\n\n", result).strip()
+
+
 def extract_json_object(text: str) -> dict | None:
     """Best-effort extraction of a single JSON object from LLM text output.
 

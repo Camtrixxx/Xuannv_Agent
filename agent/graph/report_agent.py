@@ -8,6 +8,7 @@ from agent.services.aef_analysis_service import AEFAnalysisService
 from agent.services.analysis_service import MockAnalysisService
 from agent.services.intent_service import IntentService
 from agent.services.llm_provider import DeepSeekProvider, LLMProvider
+from agent.services.common import strip_markdown
 from agent.services.memory_service import MemoryService
 from agent.services.region_availability import (
     coverage_hint,
@@ -242,13 +243,17 @@ class ReportAgent:
                 "输出层次清晰、语言通俗专业的结果（精简版要短，详细版要展开）。\n"
                 "始终忠于报告中的数据，不要编造报告里没有的数字或事实，"
                 "也不要输出系统参数、文件路径或免责声明。"
+                "用自然口语、纯文本作答，不要用 Markdown 排版。"
             )
             user_prompt = (
                 f"上一次报告内容（JSON）：\n{json.dumps(report_context, ensure_ascii=False)}\n\n"
                 f"用户的需求：{request.prompt}\n\n请据此给出结果。"
             )
         else:
-            system_prompt = "你是遥感报告助手。请用简洁自然的中文回答用户，不要生成报告，除非用户明确要求。"
+            system_prompt = (
+                "你是遥感报告助手。请用简洁自然的中文回答用户，不要生成报告，除非用户明确要求。"
+                "用自然口语、纯文本作答，不要用 Markdown 排版。"
+            )
             user_prompt = (
                 f"用户问题：{request.prompt}\n"
                 "请自然地回答；你可以帮助生成地物分类、水体分布、高程地形等遥感专题报告。"
@@ -256,7 +261,7 @@ class ReportAgent:
         text = self.chat_llm.complete(system_prompt, user_prompt)
         state["status"] = AgentStatus.CHAT
         if text:
-            state["message"] = text.strip()
+            state["message"] = strip_markdown(text)
         elif report_context:
             # Grounded turn but the LLM hiccuped — stay on-topic and invite a retry
             # rather than falling back to a generic greeting.
