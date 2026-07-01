@@ -14,6 +14,14 @@ mkdir -p "${LOG_DIR}" "${PID_DIR}"
 cd "${PROJECT_ROOT}"
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 
+# Load local secrets (e.g. DEEPSEEK_API_KEY) from a gitignored .env if present.
+if [[ -f "${PROJECT_ROOT}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${PROJECT_ROOT}/.env"
+  set +a
+fi
+
 if [[ -f "${PID_FILE}" ]]; then
   old_pid="$(cat "${PID_FILE}" || true)"
   if [[ -n "${old_pid}" ]] && kill -0 "${old_pid}" >/dev/null 2>&1; then

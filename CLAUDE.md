@@ -132,7 +132,7 @@ A standalone FastAPI service that loads a PyTorch deploy model and exposes REST 
 
 ### Configuration (`agent/config.py`)
 
-All config is env-driven via dataclasses with `field(default_factory=...)`. No `.env` file loading — set variables in the environment directly. Key variables:
+All config is env-driven via dataclasses with `field(default_factory=...)`. The Python code itself does no `.env` loading, but `scripts/start_agent_backend.sh` sources a gitignored `.env` at the repo root (if present) before launching, so secrets like `DEEPSEEK_API_KEY` persist across restarts without entering git. Set variables in the environment directly when running uvicorn manually. Key variables:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
