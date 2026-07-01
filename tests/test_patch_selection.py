@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from agent.services.aef_analysis_service import MockPatchSelector
+from agent.services.patch_selection_service import PatchSelectionService
+from agent.services.yajiang_patch_index_service import YajiangPatchIndexService
 
 
 def _indices(patch_ids, count):
@@ -31,3 +33,27 @@ def test_negative_index_skipped():
 
 def test_empty_selection():
     assert _indices([], 1) == []
+
+
+def test_haidian_patch_search_allows_empty_task():
+    service = PatchSelectionService()
+    patch = {
+        "has_embedding": True,
+        "available_tasks": ["building_extraction"],
+    }
+    assert service._task_available("haidian", patch, "") is True
+
+
+def test_yajiang_patch_index_allows_empty_task():
+    service = YajiangPatchIndexService()
+    service._patches = [
+        {
+            "patch_id": "patch_000001",
+            "sample_index": 1,
+            "bounds_wgs84": [116.0, 39.0, 117.0, 40.0],
+            "available_months": ["2025-12"],
+            "available_tasks": ["landcover"],
+        }
+    ]
+    rows = service.search([116.1, 39.1, 116.2, 39.2], task_id="", time_range="2025-12", limit=5)
+    assert [row["patch_id"] for row in rows] == ["patch_000001"]

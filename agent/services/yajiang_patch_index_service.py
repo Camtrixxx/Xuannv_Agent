@@ -80,7 +80,7 @@ class YajiangPatchIndexService:
         for patch in self.patches:
             if time_range and time_range not in patch.get("available_months", []):
                 continue
-            if task_id not in patch.get("available_tasks", []):
+            if task_id and task_id not in patch.get("available_tasks", []):
                 continue
             score = bbox_intersection_score([float(v) for v in patch["bounds_wgs84"]], bbox)
             if score <= 0:

@@ -192,6 +192,8 @@ class PatchSelectionService:
         return TASK_TO_HARBIN.get(task, task)
 
     def _task_available(self, region_id: str, patch: dict[str, Any], task_id: str) -> bool:
+        if not task_id:
+            return True
         if region_id == "yajiang":
             tasks = patch.get("available_tasks") or []
             return task_id in tasks
