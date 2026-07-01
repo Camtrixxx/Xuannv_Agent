@@ -628,6 +628,12 @@
       font-weight: 700;
     }
 
+    .tag:disabled {
+      cursor: not-allowed;
+      color: #94a3b8;
+      background: #f8fafc;
+    }
+
     .map-btn {
       border-radius: 12px;
       color: var(--green);
@@ -1104,14 +1110,7 @@
         <footer class="composer-wrap">
           <section class="composer">
             <div class="toolbar">
-              <div class="task-tags">
-                <button class="tag active" data-task="地物分类">地物分类</button>
-                <button class="tag" data-task="水体分布">水体分布</button>
-                <button class="tag" data-task="水体提取">水体提取</button>
-                <button class="tag" data-task="建筑物提取">建筑物提取</button>
-                <button class="tag" data-task="土地利用分类">土地利用分类</button>
-                <button class="tag" data-task="高程地形">高程地形</button>
-              </div>
+              <div class="task-tags" id="taskTags"></div>
               <button class="map-btn" id="openMap">选择地图：雅江区域</button>
             </div>
             <div class="input-row">
@@ -1122,6 +1121,7 @@
               <button class="suggestion" data-prompt="给我一份分析报告">缺月份示例</button>
               <button class="suggestion" data-prompt="去年十月份">补充月份</button>
               <button class="suggestion" data-prompt="哈尔滨新区去年九月份土地利用分类报告">哈尔滨示例</button>
+              <button class="suggestion" data-prompt="北京市海淀区2025年12月建筑物提取报告">海淀示例</button>
               <button class="suggestion" data-prompt="你能做什么？">普通对话</button>
             </div>
           </section>
@@ -1158,7 +1158,6 @@
           <div id="leafletMap"></div>
           <div class="map-tools">
             <button id="startMapSelect" type="button">框选区域</button>
-            <button id="searchVisiblePatches" type="button">检索当前视野</button>
             <button id="toggleBaseLayer" type="button">卫星图层</button>
           </div>
         </div>
@@ -1200,26 +1199,33 @@
     const regionData = {
       "雅江区域": {
         main: "林地/草地",
-        center: [30.03, 101.02],
+        center: [29.601479, 95.301624],
         zoom: 10,
-        summary: "区域内林地、草地和裸地占比较高，水体主要沿河谷呈线状分布，适合用于山地生态和水体相关快速研判。"
+        defaultBbox: [95.039912, 29.341305, 95.563335, 29.861653],
+        tasks: ["地物分类", "水体分布", "高程地形"],
+        summary: "区域内 patch 数据位于雅江原始遥感数据覆盖范围内，支持地图框选后定位到本地 AEF 样本 patch。"
       },
       "哈尔滨新区": {
         main: "耕地/水体",
         center: [45.752, 126.548],
         zoom: 13,
         defaultBbox: [126.5, 45.74, 126.57, 45.765],
+        tasks: ["建筑物提取", "土地利用分类", "水体提取"],
         summary: "区域内耕地和建设用地分布明显，水体沿松花江及支流展开，适合用于城市周边地表覆盖和水体格局研判。"
       },
       "北京市海淀区": {
         main: "建设用地",
-        center: [39.96, 116.30],
-        zoom: 11,
-        summary: "区域内建设用地占比较高，绿地主要分布在西部山前地带和公园片区，水体呈局部斑块状分布。"
+        center: [39.895, 116.27],
+        zoom: 13,
+        defaultBbox: [116.24, 39.88, 116.29, 39.90],
+        tasks: ["建筑物提取", "道路提取", "施工识别", "土地利用分类", "土地覆盖分类", "水体提取"],
+        summary: "区域内建设用地占比较高，绿地主要分布在西部山前地带和公园片区，适合用于城市专题要素提取和变化研判。"
       }
     };
+    const patchSearchRegions = new Set(["雅江区域", "哈尔滨新区", "北京市海淀区"]);
 
     const messages = document.getElementById("messages");
+    const taskTags = document.getElementById("taskTags");
     const sessionList = document.getElementById("sessionList");
     const mapModal = document.getElementById("mapModal");
     const openMap = document.getElementById("openMap");
@@ -1238,6 +1244,7 @@
     let selectStartLatLng = null;
     let selectedAoi = null;
     let selectedPatchIds = [];
+    let selectedPatchRegion = "";
     let candidatePatches = [];
     let selectionLayer = null;
     let patchLayers = [];
@@ -1264,6 +1271,23 @@
 
     function renderInitialMessage(text = "请选择任务类型和地图区域，然后输入你的需求。我会把结果直接返回在这里。") {
       messages.innerHTML = `<div class="msg agent">${escapeHtml(text)}</div>`;
+    }
+
+    function getRegionTasks(region) {
+      return (regionData[region] && regionData[region].tasks) || [];
+    }
+
+    function renderTaskTags(preferredTask = "") {
+      const tasks = getRegionTasks(currentRegion);
+      if (!tasks.length) {
+        currentTask = "";
+        taskTags.innerHTML = '<button class="tag" type="button" disabled>专题任务待接入</button>';
+        return;
+      }
+      currentTask = tasks.includes(preferredTask) ? preferredTask : (tasks.includes(currentTask) ? currentTask : tasks[0]);
+      taskTags.innerHTML = tasks.map((task) => `
+        <button class="tag ${task === currentTask ? "active" : ""}" data-task="${escapeHtml(task)}" type="button">${escapeHtml(task)}</button>
+      `).join("");
     }
 
     function formatSessionTime(value) {
@@ -1427,15 +1451,12 @@
           intent: payload.session?.current_intent || {}
         });
         const intent = payload.session?.current_intent || {};
-        if (intent.task) {
-          currentTask = intent.task;
-          document.querySelectorAll(".tag").forEach((item) => item.classList.toggle("active", item.dataset.task === currentTask));
-        }
         if (intent.region && regionData[intent.region]) {
           currentRegion = intent.region;
           document.querySelectorAll(".region").forEach((item) => item.classList.toggle("active", item.dataset.region === currentRegion));
-          updateMapLabel();
         }
+        renderTaskTags(intent.task || currentTask);
+        updateMapLabel();
         await refreshSessions();
       } catch (error) {
         addMessage(`<p>会话加载失败：${escapeHtml(error.message || "未知错误")}</p>`, "agent");
@@ -1459,7 +1480,7 @@
         leafletMap.setView(data.center, data.zoom, {animate: false});
         refreshLeafletMap();
       }
-      if (currentRegion !== "哈尔滨新区") {
+      if (!patchSearchRegions.has(currentRegion)) {
         clearPatchSelection();
         patchStatus.textContent = "当前区域暂不支持地图定位 patch。";
       }
@@ -1468,10 +1489,11 @@
     function clearPatchSelection() {
       selectedAoi = null;
       selectedPatchIds = [];
+      selectedPatchRegion = "";
       candidatePatches = [];
       patchList.innerHTML = "";
       confirmPatchSelection.disabled = true;
-      patchStatus.textContent = currentRegion === "哈尔滨新区"
+      patchStatus.textContent = patchSearchRegions.has(currentRegion)
         ? ""
         : "当前区域暂不支持地图定位 patch。";
       patchLayers.forEach((layer) => layer.remove());
@@ -1594,20 +1616,12 @@
     }
 
     function setMapSelecting() {
-      if (currentRegion !== "哈尔滨新区") {
-        patchStatus.textContent = "请先选择哈尔滨新区；雅江和海淀暂未接入地图 patch 检索。";
+      if (!patchSearchRegions.has(currentRegion)) {
+        patchStatus.textContent = "请先选择已接入 patch 检索的区域。";
         return;
       }
       selectingMap = true;
       patchStatus.textContent = "";
-    }
-
-    function bboxFromCurrentMap() {
-      if (!leafletMap) {
-        return regionData["哈尔滨新区"].defaultBbox;
-      }
-      const bounds = leafletMap.getBounds();
-      return [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()];
     }
 
     function extractTimeRangeFromPrompt(text) {
@@ -1633,7 +1647,7 @@
     }
 
     async function searchPatches(bbox) {
-      if (currentRegion !== "哈尔滨新区") {
+      if (!patchSearchRegions.has(currentRegion)) {
         patchStatus.textContent = "当前区域暂不支持地图定位 patch。";
         return;
       }
@@ -1642,6 +1656,7 @@
       patchLayers.forEach((layer) => layer.remove());
       patchLayers = [];
       selectedPatchIds = [];
+      selectedPatchRegion = "";
       confirmPatchSelection.disabled = true;
       try {
         const response = await fetch("/api/patches/search", {
@@ -1660,20 +1675,21 @@
           throw new Error(payload.detail || payload.message || "patch 检索失败");
         }
         candidatePatches = payload.patches || [];
-        renderPatchCandidates();
+        renderPatchCandidates(payload.message || "");
       } catch (error) {
         patchStatus.textContent = `检索失败：${error.message || "未知错误"}`;
       }
     }
 
-    function renderPatchCandidates() {
+    function renderPatchCandidates(message = "") {
       if (!candidatePatches.length) {
-        patchStatus.textContent = "当前范围没有找到可用 patch。";
+        patchStatus.textContent = message || "当前范围没有找到可用 patch。";
         return;
       }
       selectedPatchIds = [candidatePatches[0].patch_id];
+      selectedPatchRegion = currentRegion;
       confirmPatchSelection.disabled = false;
-      patchStatus.textContent = `找到 ${candidatePatches.length} 个候选 patch，已默认选择第一个。`;
+      patchStatus.textContent = message || `找到 ${candidatePatches.length} 个候选 patch，已默认选择第一个。`;
       patchList.innerHTML = candidatePatches.map((patch, index) => `
         <button class="patch-item ${index === 0 ? "active" : ""}" data-patch-id="${escapeHtml(patch.patch_id)}" type="button">
           <strong>${escapeHtml(patch.patch_id)}</strong>
@@ -1699,6 +1715,7 @@
 
     function selectPatch(patchId) {
       selectedPatchIds = [patchId];
+      selectedPatchRegion = currentRegion;
       patchList.querySelectorAll(".patch-item").forEach((item) => {
         item.classList.toggle("active", item.dataset.patchId === patchId);
       });
@@ -1900,7 +1917,6 @@
     }
 
     function renderClarification(payload) {
-      const isConfirmation = payload.status === "needs_confirmation";
       return `
         <div class="report-card">
           <p>${escapeHtml(payload.message || "请补充关键信息。")}</p>
@@ -1910,7 +1926,6 @@
             <span class="intent-pill">时间：${escapeHtml(payload.intent?.time_range || "待补充")}</span>
             <span class="intent-pill">缺失：${escapeHtml((payload.intent?.missing_fields || []).join(", ") || "未知")}</span>
           </div>
-          ${isConfirmation ? '<div class="report-links"><button class="suggestion confirm-reuse" type="button">确认沿用</button></div>' : ''}
         </div>
       `;
     }
@@ -1921,17 +1936,22 @@
       if (!prompt) {
         return;
       }
+      if (!currentTask) {
+        addMessage("当前区域的专题任务还没有接入，请先选择雅江区域、哈尔滨新区或北京市海淀区。", "agent");
+        return;
+      }
       sendButton.disabled = true;
       addMessage(prompt || `生成${currentRegion}${currentTask}报告`, "user");
       addMessage("正在理解你的意图并更新会话状态。", "agent");
       try {
+        const requestRegion = selectedPatchIds.length && selectedPatchRegion ? selectedPatchRegion : currentRegion;
         const response = await fetch("/api/report", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({
             session_id: sessionId,
             task: currentTask,
-            region: currentRegion,
+            region: requestRegion,
             prompt: prompt,
             selected_patch_ids: selectedPatchIds,
             aoi: selectedAoi || {}
@@ -1941,7 +1961,7 @@
         updateMemoryStrip(payload);
         refreshSessions();
         if (!response.ok || payload.status !== "ok") {
-          if (payload.status === "needs_input" || payload.status === "needs_confirmation") {
+          if (payload.status === "needs_input") {
             messages.removeChild(messages.lastElementChild);
             addMessage(renderClarification(payload), "agent");
             return;
@@ -1951,7 +1971,7 @@
             addMessage(`<p>${escapeHtml(payload.message || "我在。")}</p>`, "agent");
             return;
           }
-          throw new Error(payload.error || "报告生成失败");
+          throw new Error(payload.detail || payload.error || payload.message || "报告生成失败");
         }
         messages.removeChild(messages.lastElementChild);
         addMessage(renderReportCard(payload), "agent");
@@ -1990,14 +2010,15 @@
       loadSession(item.dataset.sessionId);
     });
 
-    document.querySelectorAll(".tag").forEach((tag) => {
-      tag.addEventListener("click", () => {
-        document.querySelectorAll(".tag").forEach((item) => item.classList.remove("active"));
-        tag.classList.add("active");
-        currentTask = tag.dataset.task;
-        clearPatchSelection();
-        updateMapLabel();
-      });
+    taskTags.addEventListener("click", (event) => {
+      const tag = event.target.closest(".tag");
+      if (!tag || tag.disabled || !tag.dataset.task) {
+        return;
+      }
+      currentTask = tag.dataset.task;
+      renderTaskTags(currentTask);
+      clearPatchSelection();
+      updateMapLabel();
     });
 
     openMap.addEventListener("click", () => {
@@ -2012,11 +2033,6 @@
     });
 
     document.getElementById("startMapSelect").addEventListener("click", setMapSelecting);
-
-    document.getElementById("searchVisiblePatches").addEventListener("click", async () => {
-      selectedAoi = {type: "bbox", coordinates: bboxFromCurrentMap()};
-      await searchPatches(selectedAoi.coordinates);
-    });
 
     document.getElementById("toggleBaseLayer").addEventListener("click", toggleBaseLayer);
 
@@ -2049,6 +2065,7 @@
         region.classList.add("active");
         currentRegion = region.dataset.region;
         clearPatchSelection();
+        renderTaskTags();
         updateMapLabel();
       });
     });
@@ -2067,12 +2084,6 @@
         openPreview(previewLink.dataset.previewUrl, previewLink.dataset.previewType, previewLink.dataset.previewTitle);
         return;
       }
-      const button = event.target.closest(".confirm-reuse");
-      if (!button) {
-        return;
-      }
-      document.getElementById("prompt").value = "确认沿用";
-      sendMessage();
     });
 
     toggleMarkdownRaw.addEventListener("click", () => {
@@ -2091,6 +2102,7 @@
       }
     });
 
+    renderTaskTags(currentTask);
     updateMapLabel();
     updateMemoryStrip({status: "idle", session_id: sessionId, memory: {pending_slots: []}});
     refreshSessions();
