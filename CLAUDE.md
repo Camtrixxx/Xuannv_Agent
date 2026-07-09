@@ -175,6 +175,8 @@ tests/           pytest units for the deterministic, network-free helpers
 aef_inference/
   server.py      FastAPI app exposing /api/infer, /api/patch-rgb, /api/health, /api/meta
   runner.py      Model loading, inference, visualization, caching (1436 lines)
+docs/            Product/planning docs: capability-boundary analysis (10m 底座场景边界)
+                 and the development plan (海淀三场景与架构演进)
 scripts/         start/stop/status shell scripts for Agent, AEF, and both together
 ```
 
