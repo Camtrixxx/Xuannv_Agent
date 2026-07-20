@@ -35,7 +35,7 @@ scripts/start_aef_inference_service.sh
 
 ```bash
 PYTHONPATH=/data/heyuhang/Xuannv_Agent:/data/heyuhang/yajiang-aef \
-  /opt/miniconda3/envs/hyh-dl/bin/python -m aef_inference.server
+  /home/heyuhang/miniconda3/envs/hyh-dl/bin/python -m aef_inference.server
 ```
 
 ## 接口

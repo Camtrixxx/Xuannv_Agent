@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PYTHON="${PYTHON:-/opt/miniconda3/envs/hyh-dl/bin/python}"
+PYTHON="${PYTHON:-/home/heyuhang/miniconda3/envs/hyh-dl/bin/python}"
 HOST="${AGENT_HOST:-0.0.0.0}"
 PORT="${AGENT_PORT:-7870}"
 LOG_DIR="${PROJECT_ROOT}/agent/runtime/logs"

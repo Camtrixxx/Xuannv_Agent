@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PYTHON="${PYTHON:-/opt/miniconda3/envs/hyh-dl/bin/python}"
+PYTHON="${PYTHON:-/home/heyuhang/miniconda3/envs/hyh-dl/bin/python}"
 HOST="${AEF_HOST:-127.0.0.1}"
 PORT="${AEF_PORT:-7862}"
 
