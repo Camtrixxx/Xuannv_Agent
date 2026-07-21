@@ -228,6 +228,8 @@ NON_NATIVE_ALIASES = {
 READY_MODEL_STATUSES = {"ready", "completed"}
 # Statuses that mean "still training, come back later".
 TRAINING_MODEL_STATUSES = {"training", "running", "pending", "queued"}
+# Statuses that mean the last training attempt failed (offer a retry).
+FAILED_MODEL_STATUSES = {"failed", "error"}
 
 
 def native_object(text: str) -> str:

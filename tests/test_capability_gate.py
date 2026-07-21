@@ -10,7 +10,7 @@ from agent.config import MemoryConfig
 from agent.graph.report_agent import ReportAgent
 from agent.schemas.report import AgentStatus, ReportRequest
 from agent.services.capability_service import (
-    Capability, CUSTOM_READY, CUSTOM_TRAINING, NATIVE, NEEDS_ANNOTATION,
+    Capability, CUSTOM_FAILED, CUSTOM_READY, CUSTOM_TRAINING, NATIVE, NEEDS_ANNOTATION,
 )
 from agent.services.llm_provider import LLMProvider
 from agent.services.memory_service import MemoryService
@@ -146,3 +146,27 @@ def test_ok_without_pending_does_not_resume(tmp_path):
     r = agent.run(_req("好了", "s6"))
     assert r.status in {AgentStatus.CHAT, AgentStatus.NEEDS_INPUT}
     assert not r.memory.get("pending_custom_model")
+
+
+def test_failed_training_offers_retry(tmp_path):
+    # A model exists but its last training failed → handoff framed as a retry.
+    agent = _agent(tmp_path, {"湿地": Capability(kind=CUSTOM_FAILED, class_name="湿地", model_id="m_f", model_status="failed")})
+    r = agent.run(_req("对比2025-12和2026-05的湿地变化", "sf1", aoi=AOI))
+    assert r.status == AgentStatus.NEEDS_ANNOTATION
+    assert r.action.get("type") == "open_annotation_ui"
+    assert "没有成功" in r.message or "训练" in r.message
+    # Pending remembered so the retry can resume.
+    assert r.memory["pending_custom_model"]["class_name"] == "湿地"
+
+
+def test_resume_after_failed_training(tmp_path):
+    # Turn 1: needs annotation. Turn 2: training came back failed → retry copy.
+    caps = {"机场": Capability(kind=NEEDS_ANNOTATION, class_name="机场")}
+    agent = _agent(tmp_path, caps)
+    agent.run(_req("监测机场变化 2025-12 到 2026-05", "sf2", aoi=AOI))
+    caps["机场"] = Capability(kind=CUSTOM_FAILED, class_name="机场", model_id="mf", model_status="failed")
+    r = agent.run(_req("训练完了", "sf2", aoi=AOI))
+    assert r.status == AgentStatus.NEEDS_ANNOTATION
+    assert "没有成功" in r.message or "没成功" in r.message
+    # Still pending (retry not yet done).
+    assert r.memory["pending_custom_model"]["class_name"] == "机场"

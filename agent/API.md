@@ -92,8 +92,39 @@ Frontend
 | status | 含义 | 前端行为 |
 | --- | --- | --- |
 | `ok` | 报告已生成 | 展示 `message`，并渲染 `report` 卡片和右侧预览 |
-| `needs_input` | 需要用户补充信息：缺任务、缺月份，或月份不在可用范围 | 展示 `message`（会列出可选任务或可用月份），等待用户继续输入 |
+| `needs_input` | 需要用户补充信息：缺任务、缺月份，或月份不在可用范围；也用于自定义模型**训练中**时的等待提示 | 展示 `message`（会列出可选任务或可用月份），等待用户继续输入 |
+| `needs_annotation` | 用户要分析的是**非内置地物**（如湿地、机场），且没有可用的自定义模型（从未标注，或上次训练失败）。需要先去标注页标注少量样本再训练 | 展示 `message`，并按 `action` 打开标注入口（见下）；用户完成后回到对话说“标注好了 / 训练完了”即可继续 |
 | `chat` | 自然语言对话：闲聊、提问、就已有报告追问/解释/改写 | 只展示 `message`，不展示报告卡片 |
+
+### `action` 交接指令（配合 `needs_annotation`）
+
+当 `status = needs_annotation` 时，响应会带一个 `action` 对象，指示前端把用户交接到标注页。其他状态下 `action` 为 `{}`（空对象）。Agent **自己不打开任何页面**，只下达指令；打开方式（通常新标签页打开 `url`）由前端决定。
+
+```json
+{
+  "status": "needs_annotation",
+  "message": "『湿地』不是内置地物，需要先在标注页标注少量样本再训练……",
+  "action": {
+    "type": "open_annotation_ui",
+    "url": "http://<embedding-api-base>/models/new?region_id=haidian&class=湿地&model_type=single_time_detection&month=202512",
+    "class_name": "湿地",
+    "model_type": "single_time_detection",
+    "params": { "region_id": "haidian", "class": "湿地", "model_type": "single_time_detection", "month": "202512" }
+  }
+}
+```
+
+字段说明：
+
+| 字段 | 含义 |
+| --- | --- |
+| `type` | 指令类型，目前只有 `open_annotation_ui`。前端据此决定处理方式 |
+| `url` | 标注页深链，已带好 `region_id / class / model_type`（可选 `month`）。基址取环境变量 `AGENT_ANNOTATION_UI_BASE`（默认与 embedding-api 同址）|
+| `class_name` | 待标注/训练的目标类名（=用户所说的非内置地物）|
+| `model_type` | `single_time_detection`（单期）或 `change_detection`（换检）|
+| `params` | 组成 `url` 的原始参数，前端也可用它自行拼链 |
+
+**恢复流程**：用户标注并训练后回到对话说“标注好了 / 训练完了 / 好了”，Agent 会**重新查询该模型的真实状态**（不轻信用户口头说法）：已就绪则恢复原任务（沿用之前的月份/AOI）继续分析；仍在训练则提示稍候；若训练失败则如实说明并再次给出标注入口（`action` 复现）。调试阶段前端可用 mock 页面承接该 `url`。
 
 ### 对话与报告的边界（重要）
 

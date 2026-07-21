@@ -28,7 +28,7 @@ from agent.services.regional_analysis_service import RegionalAnalysisService
 from agent.services.region_checkup_service import RegionCheckupService
 from agent.services.change_monitor_service import ChangeMonitorService
 from agent.services.pressure_score_service import PressureScoreService
-from agent.services.capability_service import CapabilityService, NEEDS_ANNOTATION as CAP_NEEDS_ANNOTATION, CUSTOM_READY, CUSTOM_TRAINING
+from agent.services.capability_service import CapabilityService, NEEDS_ANNOTATION as CAP_NEEDS_ANNOTATION, CUSTOM_READY, CUSTOM_TRAINING, CUSTOM_FAILED
 from agent.services.report_service import ReportService
 from agent.taxonomy import non_native_object
 
@@ -406,22 +406,35 @@ class ReportAgent:
             )
             self._remember_pending(state, intent, cap, model_status=cap.model_status, model_id=cap.model_id)
             return state
+        if cap.kind == CUSTOM_FAILED:
+            return self._handoff_annotation(state, intent, cap, failed=True)
         if cap.kind == CAP_NEEDS_ANNOTATION:
             return self._handoff_annotation(state, intent, cap)
         return None
 
-    def _handoff_annotation(self, state, intent, cap):
-        """Non-native object with no model: hand off to the annotation UI."""
+    def _handoff_annotation(self, state, intent, cap, *, failed: bool = False):
+        """Hand off to the annotation UI.
+
+        ``failed=True`` means a prior training attempt failed — say so plainly
+        and frame it as a retry, rather than the first-time "not built-in" copy.
+        """
         month = intent.time_range or (state["request"].time_range or "")
         action = self.capability_service.annotation_action(cap, month=month)
         state["status"] = AgentStatus.NEEDS_ANNOTATION
         state["action"] = action
-        state["message"] = (
-            f"『{cap.class_name}』不是内置地物，需要先在标注页标注少量样本再训练"
-            f"（样本很少时系统会自动用相似度召回，无需大量标注）。"
-            f"已为你准备好标注入口，完成后回来告诉我“标注好了 / 训练完了”，我就继续这次分析。"
-        )
-        self._remember_pending(state, intent, cap, action=action)
+        if failed:
+            state["message"] = (
+                f"『{cap.class_name}』上一次训练没有成功（模型状态 {cap.model_status or 'failed'}）。"
+                f"多半是标注样本太少或不够典型。已重新为你打开标注入口，"
+                f"建议补几个更清晰的样本再训练，完成后回来告诉我“标注好了 / 训练完了”，我继续这次分析。"
+            )
+        else:
+            state["message"] = (
+                f"『{cap.class_name}』不是内置地物，需要先在标注页标注少量样本再训练"
+                f"（样本很少时系统会自动用相似度召回，无需大量标注）。"
+                f"已为你准备好标注入口，完成后回来告诉我“标注好了 / 训练完了”，我就继续这次分析。"
+            )
+        self._remember_pending(state, intent, cap, action=action, model_status=cap.model_status, model_id=cap.model_id)
         return state
 
     def _remember_pending(self, state, intent, cap, *, action=None, model_status="", model_id=""):
@@ -473,8 +486,11 @@ class ReportAgent:
                 f"『{class_name}』的模型还在训练中，请稍等片刻，训练完成后再对我说“好了”。"
             )
             return state
-        # Still nothing ready (annotation not started / failed) — re-offer handoff.
         cap.class_name = cap.class_name or class_name
+        # Training failed between turns → say so and re-offer as a retry.
+        if cap.kind == CUSTOM_FAILED:
+            return self._handoff_annotation(state, intent, cap, failed=True)
+        # Still nothing ready (annotation never started) — re-offer handoff.
         return self._handoff_annotation(state, intent, cap)
 
     def _apply_resumed_pending(self, state, intent, pending, cap):

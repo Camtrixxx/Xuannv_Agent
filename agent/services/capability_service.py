@@ -27,6 +27,7 @@ from agent.taxonomy import native_object, non_native_object, resolve_region_id
 NATIVE = "native"
 CUSTOM_READY = "custom_ready"
 CUSTOM_TRAINING = "custom_training"
+CUSTOM_FAILED = "custom_failed"
 NEEDS_ANNOTATION = "needs_annotation"
 
 
@@ -97,6 +98,14 @@ class CapabilityService:
             return Capability(
                 kind=CUSTOM_TRAINING, target_object=obj, class_name=class_name,
                 model_id=training.id, model_status=training.status, region_id=region_id,
+            )
+        # A model exists but its last training failed → offer a retry (re-annotate),
+        # distinct from "never annotated" so the message can say what happened.
+        failed = next((m for m in matches if m.is_failed), None)
+        if failed is not None:
+            return Capability(
+                kind=CUSTOM_FAILED, target_object=obj, class_name=class_name,
+                model_id=failed.id, model_status=failed.status, region_id=region_id,
             )
         return Capability(
             kind=NEEDS_ANNOTATION, target_object=obj, class_name=class_name,

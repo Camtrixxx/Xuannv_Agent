@@ -24,7 +24,7 @@ from typing import Any
 
 from agent.config import EmbeddingAPIConfig
 from agent.services.http_client import JsonHttpClient
-from agent.taxonomy import READY_MODEL_STATUSES, TRAINING_MODEL_STATUSES
+from agent.taxonomy import FAILED_MODEL_STATUSES, READY_MODEL_STATUSES, TRAINING_MODEL_STATUSES
 
 
 @dataclass(slots=True)
@@ -45,6 +45,10 @@ class ModelInfo:
     @property
     def is_training(self) -> bool:
         return self.status in TRAINING_MODEL_STATUSES
+
+    @property
+    def is_failed(self) -> bool:
+        return self.status in FAILED_MODEL_STATUSES
 
     @property
     def class_names(self) -> list[str]:

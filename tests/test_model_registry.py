@@ -45,11 +45,28 @@ def test_list_models_parses_payload(monkeypatch):
     assert all(isinstance(m, ModelInfo) for m in models)
 
 
+CUSTOM_WETLAND_FAILED = {
+    "id": "model_wet3", "name": "湿地头v3", "type": "single_time_detection",
+    "task_type": "building_extraction", "status": "failed", "source": "custom",
+    "classes": [{"id": "cls_000", "name": "湿地", "color": "#20beda"}],
+}
+
+
 def test_is_ready_and_is_training():
     assert ModelInfo.from_payload(CUSTOM_WETLAND).is_ready
     assert not ModelInfo.from_payload(CUSTOM_WETLAND).is_training
     assert ModelInfo.from_payload(SYSTEM_BUILDING).is_ready  # system "ready"
     assert ModelInfo.from_payload(CUSTOM_WETLAND_TRAINING).is_training
+    assert ModelInfo.from_payload(CUSTOM_WETLAND_FAILED).is_failed
+    assert not ModelInfo.from_payload(CUSTOM_WETLAND_FAILED).is_ready
+
+
+def test_capability_resolve_failed(monkeypatch):
+    from agent.services.capability_service import CapabilityService, CUSTOM_FAILED
+    reg = _registry(monkeypatch, [CUSTOM_WETLAND_FAILED])
+    cap = CapabilityService(registry=reg).resolve("北京市海淀区", "湿地")
+    assert cap.kind == CUSTOM_FAILED
+    assert cap.class_name == "湿地" and cap.model_status == "failed"
 
 
 def test_custom_models_filters_out_system(monkeypatch):
