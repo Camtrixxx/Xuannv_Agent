@@ -28,7 +28,9 @@ from agent.services.regional_analysis_service import RegionalAnalysisService
 from agent.services.region_checkup_service import RegionCheckupService
 from agent.services.change_monitor_service import ChangeMonitorService
 from agent.services.pressure_score_service import PressureScoreService
+from agent.services.capability_service import CapabilityService, NEEDS_ANNOTATION as CAP_NEEDS_ANNOTATION, CUSTOM_READY, CUSTOM_TRAINING
 from agent.services.report_service import ReportService
+from agent.taxonomy import non_native_object
 
 try:
     from langgraph.graph import END, StateGraph
@@ -45,6 +47,7 @@ class ReportAgentState(TypedDict, total=False):
     message: str
     analysis: Any
     report: Any
+    action: dict[str, Any]
     debug: dict[str, Any]
 
 
@@ -65,6 +68,7 @@ class ReportAgent:
         checkup_service: RegionCheckupService | None = None,
         change_service: ChangeMonitorService | None = None,
         score_service: PressureScoreService | None = None,
+        capability_service: CapabilityService | None = None,
     ) -> None:
         self.intent_service = intent_service or IntentService()
         self.memory_service = memory_service or MemoryService()
@@ -74,6 +78,7 @@ class ReportAgent:
         self.checkup_service = checkup_service or RegionCheckupService()
         self.change_service = change_service or ChangeMonitorService()
         self.score_service = score_service or PressureScoreService()
+        self.capability_service = capability_service or CapabilityService()
         self.graph = self._build_graph() if StateGraph is not None else None
 
     def run(self, request: ReportRequest) -> AgentResponse:
@@ -87,7 +92,7 @@ class ReportAgent:
             else:
                 state = self._generate_report(self._run_analysis(state))
             state = self._write_memory(state)
-            if state.get("status") in {AgentStatus.NEEDS_INPUT, AgentStatus.CHAT}:
+            if state.get("status") in {AgentStatus.NEEDS_INPUT, AgentStatus.NEEDS_ANNOTATION, AgentStatus.CHAT}:
                 return self._response_from_state(request, state)
         else:
             state = self.graph.invoke({"request": request})
@@ -111,6 +116,7 @@ class ReportAgent:
             memory=self.memory_service.snapshot(response_request.session_id),
             analysis=state.get("analysis"),
             report=state.get("report"),
+            action=state.get("action") or {},
             debug=state.get("debug") or {},
         )
 
@@ -165,10 +171,27 @@ class ReportAgent:
         previous = memory.get("current_intent") or {}
         pending = memory.get("pending_slots") or []
 
+        # Resume-after-training takes precedence: if a custom model is pending for
+        # this session, this turn is very likely the user coming back to continue
+        # (even a "好了"/"继续" that would otherwise look like chat). Verify the
+        # model's real status before proceeding — never trust the user's word.
+        if memory.get("pending_custom_model"):
+            resumed = self._resume_after_training(state, intent, memory)
+            if resumed is not None:
+                return resumed
+
         if intent.message_type in {MessageType.FREE_CHAT, MessageType.FOLLOW_UP}:
             state["status"] = AgentStatus.CHAT
             state["message"] = ""
             return state
+
+        # Capability gate: if the user is asking about a non-native object (湿地,
+        # 机场, …) that has no ready custom model, hand off to annotation / ask to
+        # wait — before any scenario slot logic, so we don't ask for a month/AOI
+        # for something we can't analyze yet.
+        gated = self._gate_capability(state, intent, memory, previous)
+        if gated is not None:
+            return gated
 
         # Keep the checkup scenario sticky across the clarification turns it needs
         # (user says "体检" → we ask for an AOI → next turn they draw it + give a
@@ -350,10 +373,151 @@ class ReportAgent:
         state["message"] = "已确认监测范围与两期月份，正在做像素级变化对比。"
         return state
 
+    # ------------------------------------------------- custom-model capability
+
+    def _detect_target_object(self, intent) -> str:
+        """The non-native analysis object named this turn, or "" if native."""
+        return non_native_object(intent.user_prompt or "")
+
+    def _gate_capability(self, state, intent, memory, previous):
+        """Return a state if a non-native object blocks analysis, else None.
+
+        Only genuinely non-native objects (湿地/机场/…) are gated; native tasks
+        return None and flow through the ordinary path untouched.
+        """
+        obj = self._detect_target_object(intent)
+        if not obj:
+            return None
+        intent.target_object = obj
+        cap = self.capability_service.resolve(intent.region, obj)
+        state.setdefault("debug", {})["capability"] = {
+            "kind": cap.kind, "object": obj, "class": cap.class_name, "model_id": cap.model_id,
+        }
+        if cap.kind == CUSTOM_READY:
+            # A trained model exists — remember it so run_analysis uses it, and
+            # let the ordinary scenario/slot logic continue (fall through).
+            intent.custom_model_id = cap.model_id
+            return None
+        if cap.kind == CUSTOM_TRAINING:
+            state["status"] = AgentStatus.NEEDS_INPUT
+            state["message"] = (
+                f"『{cap.class_name}』的自定义模型正在训练中，还不能用来分析。"
+                f"训练完成后回来告诉我“好了”，我就继续。"
+            )
+            self._remember_pending(state, intent, cap, model_status=cap.model_status, model_id=cap.model_id)
+            return state
+        if cap.kind == CAP_NEEDS_ANNOTATION:
+            return self._handoff_annotation(state, intent, cap)
+        return None
+
+    def _handoff_annotation(self, state, intent, cap):
+        """Non-native object with no model: hand off to the annotation UI."""
+        month = intent.time_range or (state["request"].time_range or "")
+        action = self.capability_service.annotation_action(cap, month=month)
+        state["status"] = AgentStatus.NEEDS_ANNOTATION
+        state["action"] = action
+        state["message"] = (
+            f"『{cap.class_name}』不是内置地物，需要先在标注页标注少量样本再训练"
+            f"（样本很少时系统会自动用相似度召回，无需大量标注）。"
+            f"已为你准备好标注入口，完成后回来告诉我“标注好了 / 训练完了”，我就继续这次分析。"
+        )
+        self._remember_pending(state, intent, cap, action=action)
+        return state
+
+    def _remember_pending(self, state, intent, cap, *, action=None, model_status="", model_id=""):
+        """Persist enough to resume the original task once the model is ready."""
+        request = state["request"]
+        pending = {
+            "class_name": cap.class_name,
+            "target_object": cap.target_object,
+            "region": intent.region,
+            "region_id": cap.region_id,
+            "scenario": intent.scenario or ((state.get("memory") or {}).get("current_intent") or {}).get("scenario", ""),
+            "model_id": model_id,
+            "model_status": model_status,
+            "action": action or {},
+            # Original request params so the resumed turn reruns the same task.
+            "request": {
+                "task": intent.task,
+                "time_range": intent.time_range,
+                "before_time_range": getattr(request, "before_time_range", ""),
+                "after_time_range": getattr(request, "after_time_range", ""),
+                "aoi": request.aoi,
+            },
+        }
+        self.memory_service.set_pending_custom_model(request.session_id, pending)
+
+    def _resume_after_training(self, state, intent, memory):
+        """If a custom model is pending, check its real status and resume/wait.
+
+        Returns a state to short-circuit merge_memory, or None to fall through
+        to normal handling (e.g. the user clearly started a different request).
+        """
+        pending = memory.get("pending_custom_model") or {}
+        class_name = pending.get("class_name") or ""
+        region = pending.get("region") or intent.region
+        # If this turn names a *different* non-native object, abandon the old
+        # pending task and let the gate handle the new one.
+        new_obj = self._detect_target_object(intent)
+        if new_obj and non_native_object(class_name) and new_obj != non_native_object(class_name):
+            self.memory_service.clear_pending_custom_model(state["request"].session_id)
+            return None
+
+        cap = self.capability_service.resolve(region, class_name)
+        if cap.kind == CUSTOM_READY:
+            self.memory_service.clear_pending_custom_model(state["request"].session_id)
+            return self._apply_resumed_pending(state, intent, pending, cap)
+        if cap.kind == CUSTOM_TRAINING:
+            state["status"] = AgentStatus.NEEDS_INPUT
+            state["message"] = (
+                f"『{class_name}』的模型还在训练中，请稍等片刻，训练完成后再对我说“好了”。"
+            )
+            return state
+        # Still nothing ready (annotation not started / failed) — re-offer handoff.
+        cap.class_name = cap.class_name or class_name
+        return self._handoff_annotation(state, intent, cap)
+
+    def _apply_resumed_pending(self, state, intent, pending, cap):
+        """Restore the original task params + the now-ready model, then proceed."""
+        request = state["request"]
+        saved = pending.get("request") or {}
+        # Restore original slots the user supplied before the detour.
+        intent.task = intent.task or saved.get("task") or ""
+        intent.scenario = intent.scenario or pending.get("scenario") or ""
+        intent.target_object = pending.get("target_object") or cap.target_object
+        intent.custom_model_id = cap.model_id
+        if not intent.time_range:
+            intent.time_range = saved.get("time_range") or ""
+        if not getattr(request, "before_time_range", ""):
+            request.before_time_range = saved.get("before_time_range") or ""
+        if not getattr(request, "after_time_range", ""):
+            request.after_time_range = saved.get("after_time_range") or ""
+        if not self._has_bbox(request.aoi) and self._has_bbox(saved.get("aoi")):
+            request.aoi = saved.get("aoi")
+        state.setdefault("debug", {})["resumed_custom_model"] = cap.model_id
+        # Re-enter the appropriate scenario slot logic now that the model is ready.
+        memory = state.get("memory") or {}
+        previous = memory.get("current_intent") or {}
+        if intent.scenario == "change":
+            return self._merge_change(state, intent, memory, previous)
+        if intent.scenario in {"checkup", "score"}:
+            return self._merge_month_aoi(state, intent, memory, previous, kind=intent.scenario)
+        # Ordinary single-task custom analysis: needs a month.
+        if not intent.time_range:
+            intent.missing_fields = ["time_range"]
+            state["status"] = AgentStatus.NEEDS_INPUT
+            state["message"] = f"『{cap.class_name}』模型已就绪。请补充要分析的月份。"
+            return state
+        state["status"] = AgentStatus.OK
+        state["message"] = f"『{cap.class_name}』模型已就绪，正在生成分析。"
+        return state
+
     def _route_after_merge(self, state: ReportAgentState) -> str:
         if state.get("status") == AgentStatus.CHAT:
             return AgentRoute.CHAT_RESPONSE
-        if state.get("status") == AgentStatus.NEEDS_INPUT:
+        if state.get("status") in {AgentStatus.NEEDS_INPUT, AgentStatus.NEEDS_ANNOTATION}:
+            # Both are terminal "ask the user" turns; the message/action is
+            # already set by the gate/slot logic.
             return AgentRoute.ASK_CLARIFICATION
         return AgentRoute.RUN_ANALYSIS
 
@@ -374,7 +538,10 @@ class ReportAgent:
         return f"请补充要分析的月份。{hint}。"
 
     def _ask_clarification(self, state: ReportAgentState) -> ReportAgentState:
-        state["status"] = AgentStatus.NEEDS_INPUT
+        # Preserve a NEEDS_ANNOTATION status (with its action); otherwise this is
+        # an ordinary missing-slot clarification.
+        if state.get("status") != AgentStatus.NEEDS_ANNOTATION:
+            state["status"] = AgentStatus.NEEDS_INPUT
         # merge_memory already set the right prompt (missing-slot or unavailable-month).
         if not state.get("message"):
             intent = state.get("intent")

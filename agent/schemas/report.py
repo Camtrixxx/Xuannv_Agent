@@ -12,6 +12,9 @@ class AgentStatus:
     OK = "ok"
     NEEDS_INPUT = "needs_input"
     NEEDS_CONFIRMATION = "needs_confirmation"
+    # A non-native object needs a custom model: the agent hands off to the
+    # annotation UI and pauses until the user reports training is done.
+    NEEDS_ANNOTATION = "needs_annotation"
     CHAT = "chat"
     ERROR = "error"
 
@@ -76,6 +79,10 @@ class AgentIntent:
     source: str = "rule"
     # Composite scenario (e.g. "checkup" 片区体检). Empty = ordinary single-task report.
     scenario: str = ""
+    # Non-native analysis object detected this turn (e.g. "湿地"), and the custom
+    # model resolved for it once ready. Empty = ordinary native task.
+    target_object: str = ""
+    custom_model_id: str = ""
     debug: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -153,6 +160,11 @@ class AgentResponse:
     memory: dict[str, Any] = field(default_factory=dict)
     analysis: AnalysisResult | None = None
     report: ReportArtifact | None = None
+    # Handoff instruction for the frontend (e.g. open the annotation UI in a new
+    # tab). Empty {} for ordinary turns. Shape: {type, url, class_name,
+    # model_type, params}. The frontend interprets `type`; the agent never opens
+    # tabs itself.
+    action: dict[str, Any] = field(default_factory=dict)
     debug: dict[str, Any] = field(default_factory=dict)
 
 

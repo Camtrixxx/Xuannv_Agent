@@ -28,6 +28,10 @@ class ConversationMemory:
     mode: str = "idle"
     turn_count: int = 0
     report_context: dict[str, Any] = field(default_factory=dict)
+    # Set while a custom model is being annotated/trained for a non-native
+    # object; holds the original request params so the task can resume once
+    # the model is ready. Empty {} = nothing pending.
+    pending_custom_model: dict[str, Any] = field(default_factory=dict)
     updated_at: str = ""
     created_at: str = ""
 
@@ -52,7 +56,7 @@ class MemoryService:
                 """
                 SELECT current_intent, pending_slots, summary, mode, turn_count,
                        last_user_message, last_agent_message, report_context,
-                       created_at, updated_at
+                       pending_custom_model, created_at, updated_at
                 FROM sessions WHERE session_id = ?
                 """,
                 (session_id,),
@@ -69,6 +73,7 @@ class MemoryService:
                 mode=row["mode"] or "idle",
                 turn_count=int(row["turn_count"] or 0),
                 report_context=self._loads(row["report_context"], {}),
+                pending_custom_model=self._loads(row["pending_custom_model"], {}),
                 last_user_message=row["last_user_message"] or "",
                 last_agent_message=row["last_agent_message"] or "",
                 messages=messages,
@@ -119,6 +124,17 @@ class MemoryService:
                 (json.dumps(context, ensure_ascii=False), _now(), session_id),
             )
 
+    def set_pending_custom_model(self, session_id: str, pending: dict[str, Any]) -> None:
+        with self._lock, self._connect() as conn:
+            self._ensure_session(conn, session_id)
+            conn.execute(
+                "UPDATE sessions SET pending_custom_model = ?, updated_at = ? WHERE session_id = ?",
+                (json.dumps(pending or {}, ensure_ascii=False), _now(), session_id),
+            )
+
+    def clear_pending_custom_model(self, session_id: str) -> None:
+        self.set_pending_custom_model(session_id, {})
+
     def reset(self, session_id: str) -> ConversationMemory:
         with self._lock, self._connect() as conn:
             conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
@@ -137,6 +153,7 @@ class MemoryService:
             "summary": memory.summary,
             "turn_count": memory.turn_count,
             "report_context": memory.report_context,
+            "pending_custom_model": memory.pending_custom_model,
             "recent_messages": memory.messages[-6:],
             "reports": self.recent_reports(session_id, limit=5),
             "created_at": memory.created_at,
@@ -263,6 +280,7 @@ class MemoryService:
                     last_user_message TEXT NOT NULL DEFAULT '',
                     last_agent_message TEXT NOT NULL DEFAULT '',
                     report_context TEXT NOT NULL DEFAULT '{}',
+                    pending_custom_model TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -294,6 +312,8 @@ class MemoryService:
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
             if "report_context" not in columns:
                 conn.execute("ALTER TABLE sessions ADD COLUMN report_context TEXT NOT NULL DEFAULT '{}'")
+            if "pending_custom_model" not in columns:
+                conn.execute("ALTER TABLE sessions ADD COLUMN pending_custom_model TEXT NOT NULL DEFAULT '{}'")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
