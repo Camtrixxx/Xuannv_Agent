@@ -9,55 +9,12 @@ from agent.config import IntentConfig
 from agent.schemas.report import AgentIntent, MessageType, ReportRequest, infer_time_range
 from agent.services.common import extract_json_object
 from agent.services.llm_provider import DeepSeekProvider, LLMProvider
-
-
-SUPPORTED_TASKS = [
-    "地物分类",
-    "土地覆盖分类",
-    "水体分布",
-    "水体提取",
-    "建筑物提取",
-    "道路提取",
-    "施工识别",
-    "土地利用分类",
-    "高程地形",
-]
-SUPPORTED_REGIONS = ["雅江区域", "哈尔滨新区", "哈尔滨区域", "北京市海淀区"]
-
-TASK_ALIASES = {
-    "土地覆盖": "土地覆盖分类",
-    "土地覆盖分类": "土地覆盖分类",
-    "土地利用": "土地利用分类",
-    "土地利用分类": "土地利用分类",
-    "用地分类": "土地利用分类",
-    "用地": "土地利用分类",
-    "水体分类": "水体提取",
-    "水体提取": "水体提取",
-    "水体分布": "水体分布",
-    "建筑物": "建筑物提取",
-    "建筑提取": "建筑物提取",
-    "建筑物提取": "建筑物提取",
-    "楼房": "建筑物提取",
-    "道路": "道路提取",
-    "道路提取": "道路提取",
-    "道路识别": "道路提取",
-    "施工": "施工识别",
-    "施工识别": "施工识别",
-    "施工检测": "施工识别",
-    "施工地检测": "施工识别",
-    "高程": "高程地形",
-    "地形": "高程地形",
-}
-
-REGION_ALIASES = {
-    "哈尔滨": "哈尔滨新区",
-    "哈尔滨新区": "哈尔滨新区",
-    "哈尔滨区域": "哈尔滨区域",
-    "雅江": "雅江区域",
-    "雅江区域": "雅江区域",
-    "海淀": "北京市海淀区",
-    "北京市海淀区": "北京市海淀区",
-}
+from agent.taxonomy import (
+    REGION_ALIASES,
+    SUPPORTED_REGIONS,
+    SUPPORTED_TASKS,
+    TASK_ALIASES,
+)
 
 
 class IntentService:
@@ -73,12 +30,57 @@ class IntentService:
         self.config = config or IntentConfig()
         self.today = today
 
+    # Scenario A trigger phrases (片区综合体检). Kept deterministic so a checkup
+    # request never depends on the LLM being reachable.
+    _CHECKUP_CUES = (
+        "体检", "综合分析", "综合评估", "片区分析", "片区评估",
+        "整体分析", "整体评估", "摸底", "综合体检",
+    )
+    # Scenario B (建设扰动短周期监测). Two-date change over an AOI.
+    _CHANGE_CUES = (
+        "变化", "扰动", "监测", "两期", "对比", "比对", "对照", "新增", "增加了",
+        "扩张", "扩建", "变了", "有没有变", "变化检测", "动态", "前后对比",
+    )
+    # Scenario C (高硬化低绿地压力评分 / 补绿优先区).
+    _SCORE_CUES = (
+        "压力", "硬化", "绿地率", "补绿", "增绿", "绿化优先", "补绿优先", "优先区",
+        "最需要绿化", "哪里该绿化", "哪些地方缺绿", "缺绿", "最缺绿", "绿量不足",
+        "压力评分", "优先绿化", "该绿化",
+    )
+
+    def _has_scenario_cue(self, prompt: str) -> bool:
+        text = prompt or ""
+        return (
+            any(c in text for c in self._CHANGE_CUES)
+            or any(c in text for c in self._CHECKUP_CUES)
+            or any(c in text for c in self._SCORE_CUES)
+        )
+
+    def _detect_scenario(self, request: ReportRequest, intent: AgentIntent) -> str:
+        # Scenarios are report-producing intents; skip pure chat/follow-up turns.
+        # (Questions stay follow-up by the codebase's "questions never trigger a
+        # report" rule — the user must ask explicitly.)
+        if intent.message_type in {MessageType.FREE_CHAT, MessageType.FOLLOW_UP}:
+            return ""
+        text = request.prompt or ""
+        # Change monitoring wins over checkup when a two-date intent is expressed,
+        # so "对比两个月的变化" isn't swallowed by a generic "分析" cue. Score
+        # (补绿优先) is checked before checkup for the same reason.
+        if any(cue in text for cue in self._CHANGE_CUES):
+            return "change"
+        if any(cue in text for cue in self._SCORE_CUES):
+            return "score"
+        if any(cue in text for cue in self._CHECKUP_CUES):
+            return "checkup"
+        return ""
+
     def parse(self, request: ReportRequest) -> AgentIntent:
         started = time.perf_counter()
         rule_intent = self._validate(self._parse_with_rules(request))
         rule_intent.debug["rule_elapsed_ms"] = int((time.perf_counter() - started) * 1000)
         if self.config.rules_first and rule_intent.confidence >= self.config.rule_confidence_threshold:
             rule_intent.debug["llm_skipped"] = True
+            rule_intent.scenario = self._detect_scenario(request, rule_intent)
             return rule_intent
 
         llm_started = time.perf_counter()
@@ -92,10 +94,15 @@ class IntentService:
                 "time_range": rule_intent.time_range,
                 "confidence": rule_intent.confidence,
             }
-            return self._validate(llm_intent)
+            validated = self._validate(llm_intent)
+            # Scenario is decided by deterministic cues, not the LLM, so a checkup
+            # request works even when the model rewrites the task/message_type.
+            validated.scenario = self._detect_scenario(request, validated)
+            return validated
 
         rule_intent.debug["llm_status"] = getattr(self.llm, "last_status", "not_called")
         rule_intent.debug["llm_elapsed_ms"] = int((time.perf_counter() - llm_started) * 1000)
+        rule_intent.scenario = self._detect_scenario(request, rule_intent)
         return rule_intent
 
     def _parse_with_llm(self, request: ReportRequest) -> AgentIntent | None:
@@ -279,12 +286,34 @@ class IntentService:
             "支持哪", "可用月份", "多少", "哪些任务", "哪些月份", "可以分析", "对比一下",
         ]
         is_question = question_tail or any(p in prompt for p in question_phrases)
-        if message_type == MessageType.REPORT_REQUEST and is_question and not has_request_verb:
+        # An imperative scenario ask ("前后对比一下建筑扩张") can trip a soft question
+        # phrase ("对比一下") without being a real question. If there's a scenario cue,
+        # no hard question tail, AND no evaluative question phrase (which always means
+        # the user is questioning an existing result), keep it a report request.
+        evaluative_q = ["准不准", "准吗", "靠谱", "怎么样", "怎样", "是不是", "是否", "为什么", "为何", "区别", "啥意思"]
+        soft_question_only = (
+            is_question
+            and not question_tail
+            and self._has_scenario_cue(prompt)
+            and not any(q in prompt for q in evaluative_q)
+        )
+        if (
+            message_type == MessageType.REPORT_REQUEST
+            and is_question
+            and not has_request_verb
+            and not soft_question_only
+        ):
             message_type = MessageType.FOLLOW_UP
 
         has_report_content = task_in_prompt or region_in_prompt or "报告" in prompt or "专题" in prompt
+        # An imperative scenario ask (体检/变化监测…) is a genuine report request even
+        # without a task/month in the text — keep it rules-first so it doesn't defer to
+        # the LLM and get flipped non-deterministically. Questions are excluded above.
+        scenario_cue = self._has_scenario_cue(prompt)
         if message_type in {MessageType.FREE_CHAT, MessageType.CHANGE_CONTEXT, MessageType.CONFIRMATION, MessageType.FOLLOW_UP}:
             confidence = 0.82
+        elif message_type == MessageType.REPORT_REQUEST and scenario_cue:
+            confidence = 0.84
         elif has_report_content and (time_range or task_in_prompt):
             # Genuine report request — real report content is present.
             confidence = 0.84

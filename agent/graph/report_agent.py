@@ -3,7 +3,15 @@ from __future__ import annotations
 import json
 from typing import Any, TypedDict
 
-from agent.schemas.report import AgentResponse, AgentRoute, AgentStatus, MessageType, ReportRequest, to_dict
+from agent.schemas.report import (
+    AgentResponse,
+    AgentRoute,
+    AgentStatus,
+    MessageType,
+    ReportRequest,
+    infer_two_months,
+    to_dict,
+)
 from agent.services.aef_analysis_service import AEFAnalysisService
 from agent.services.analysis_service import MockAnalysisService
 from agent.services.intent_service import IntentService
@@ -17,6 +25,9 @@ from agent.services.region_availability import (
     unavailable_message,
 )
 from agent.services.regional_analysis_service import RegionalAnalysisService
+from agent.services.region_checkup_service import RegionCheckupService
+from agent.services.change_monitor_service import ChangeMonitorService
+from agent.services.pressure_score_service import PressureScoreService
 from agent.services.report_service import ReportService
 
 try:
@@ -51,12 +62,18 @@ class ReportAgent:
         chat_llm: LLMProvider | None = None,
         analysis_service: AEFAnalysisService | MockAnalysisService | RegionalAnalysisService | None = None,
         report_service: ReportService | None = None,
+        checkup_service: RegionCheckupService | None = None,
+        change_service: ChangeMonitorService | None = None,
+        score_service: PressureScoreService | None = None,
     ) -> None:
         self.intent_service = intent_service or IntentService()
         self.memory_service = memory_service or MemoryService()
         self.chat_llm = chat_llm or DeepSeekProvider()
         self.analysis_service = analysis_service or RegionalAnalysisService()
         self.report_service = report_service or ReportService()
+        self.checkup_service = checkup_service or RegionCheckupService()
+        self.change_service = change_service or ChangeMonitorService()
+        self.score_service = score_service or PressureScoreService()
         self.graph = self._build_graph() if StateGraph is not None else None
 
     def run(self, request: ReportRequest) -> AgentResponse:
@@ -153,6 +170,24 @@ class ReportAgent:
             state["message"] = ""
             return state
 
+        # Keep the checkup scenario sticky across the clarification turns it needs
+        # (user says "体检" → we ask for an AOI → next turn they draw it + give a
+        # month, with no "体检" word). Inherit only while its slots are still pending.
+        if not intent.scenario and previous.get("scenario") in {"checkup", "change", "score"} and pending:
+            intent.scenario = previous.get("scenario")
+
+        # Scenario A (片区综合体检): needs a month + a map AOI, not a single task.
+        # Handled before the ordinary task/month slot logic so it asks for the
+        # right things (frame an area) instead of "which task?".
+        if intent.scenario == "checkup":
+            return self._merge_checkup(state, intent, memory, previous)
+        # Scenario B (建设扰动监测): needs two months + a map AOI.
+        if intent.scenario == "change":
+            return self._merge_change(state, intent, memory, previous)
+        # Scenario C (补绿优先区评分): needs a month + a map AOI (same slots as checkup).
+        if intent.scenario == "score":
+            return self._merge_month_aoi(state, intent, memory, previous, kind="score")
+
         # Did the user name a task or month *this turn* (vs. it only being inherited)?
         specified_now = bool(intent.task) or bool(intent.time_range)
 
@@ -204,6 +239,115 @@ class ReportAgent:
 
         state["status"] = AgentStatus.OK
         state["message"] = "已完成意图解析，准备执行遥感分析。"
+        return state
+
+    def _merge_checkup(self, state, intent, memory, previous) -> ReportAgentState:
+        """Slot logic for the 片区体检 scenario: needs month + a map AOI."""
+        return self._merge_month_aoi(state, intent, memory, previous, kind="checkup")
+
+    # Prompts per month+AOI scenario (checkup / score share identical slot logic).
+    _MONTH_AOI_COPY = {
+        "checkup": {
+            "aoi_extra": " 另外请先在地图上框选体检片区。",
+            "aoi_only": "请先在地图上框选一个片区范围，我就为这个片区生成综合体检报告。",
+            "ok": "已确认片区体检范围，正在聚合各专题结果。",
+        },
+        "score": {
+            "aoi_extra": " 另外请先在地图上框选要评估的片区。",
+            "aoi_only": "请先在地图上框选一个片区范围，我就为它做高硬化低绿地压力评分、圈定补绿优先区。",
+            "ok": "已确认评估范围，正在逐 patch 计算硬化与绿地压力分。",
+        },
+    }
+
+    def _merge_month_aoi(self, state, intent, memory, previous, *, kind: str) -> ReportAgentState:
+        """Shared slot logic for scenarios needing one month + a map AOI."""
+        copy = self._MONTH_AOI_COPY[kind]
+        request = state["request"]
+        # Month may come from the frontend picker (request.time_range) or a prior turn.
+        # The LLM intent path drops the frontend month, so recover it here.
+        if not intent.time_range and request.time_range:
+            intent.time_range = request.time_range
+        if not intent.time_range and previous.get("time_range"):
+            intent.time_range = previous.get("time_range")
+        intent.confirmation_fields = []
+
+        missing: list[str] = []
+        if not intent.time_range:
+            missing.append("time_range")
+        has_aoi = self._has_bbox(request.aoi)
+        if not has_aoi:
+            missing.append("aoi")
+        intent.missing_fields = missing
+
+        if "time_range" in missing:
+            state["status"] = AgentStatus.NEEDS_INPUT
+            base = self._clarify_message(["time_range"], intent.region)
+            state["message"] = (base + copy["aoi_extra"]) if not has_aoi else base
+            return state
+        if "aoi" in missing:
+            state["status"] = AgentStatus.NEEDS_INPUT
+            state["message"] = copy["aoi_only"]
+            return state
+        if not is_month_available(intent.region, intent.time_range):
+            state["message"] = unavailable_message(intent.region, intent.time_range)
+            intent.time_range = ""
+            intent.missing_fields = ["time_range"]
+            state["status"] = AgentStatus.NEEDS_INPUT
+            return state
+
+        state["status"] = AgentStatus.OK
+        state["message"] = copy["ok"]
+        return state
+
+    def _merge_change(self, state, intent, memory, previous) -> ReportAgentState:
+        """Slot logic for the 建设扰动监测 scenario: needs two months + a map AOI."""
+        request = state["request"]
+        # Prefer explicit before/after from the request; else parse the prompt;
+        # else recover a remembered pair. Persist so later slot-fills stick.
+        before = request.before_time_range or ""
+        after = request.after_time_range or ""
+        if not (before and after):
+            before, after = infer_two_months(intent.user_prompt)
+        if not (before and after):
+            before = before or previous.get("before_time_range") or ""
+            after = after or previous.get("after_time_range") or ""
+        # Normalize + store back onto intent/request for downstream + memory.
+        request.before_time_range = before
+        request.after_time_range = after
+        intent.debug["change_window"] = {"before": before, "after": after}
+
+        has_two_months = bool(before and after and before != after)
+        has_aoi = self._has_bbox(request.aoi)
+        intent.confirmation_fields = []
+        missing: list[str] = []
+        if not has_two_months:
+            missing.append("time_range")
+        if not has_aoi:
+            missing.append("aoi")
+        intent.missing_fields = missing
+
+        if missing:
+            state["status"] = AgentStatus.NEEDS_INPUT
+            if not has_two_months and not has_aoi:
+                state["message"] = "做建设扰动监测需要两个月份对比，并在地图上框选片区。请告诉我起始月和对比月（如 2025-12 和 2026-05），并框选范围。"
+            elif not has_two_months:
+                state["message"] = "请给出要对比的两个月份（如 2025-12 和 2026-05），我来分析这段时间片区里的建设扰动。"
+            else:
+                state["message"] = "请先在地图上框选一个片区范围，我就为它做两期建设扰动对比。"
+            return state
+
+        for m in (before, after):
+            if not is_month_available(intent.region, m):
+                state["message"] = unavailable_message(intent.region, m)
+                request.before_time_range = ""
+                request.after_time_range = ""
+                intent.missing_fields = ["time_range"]
+                state["status"] = AgentStatus.NEEDS_INPUT
+                return state
+
+        intent.time_range = f"{before}→{after}"
+        state["status"] = AgentStatus.OK
+        state["message"] = "已确认监测范围与两期月份，正在做像素级变化对比。"
         return state
 
     def _route_after_merge(self, state: ReportAgentState) -> str:
@@ -310,6 +454,77 @@ class ReportAgent:
     def _run_analysis(self, state: ReportAgentState) -> ReportAgentState:
         intent = state["intent"]
         request = state["request"]
+
+        # Scenario B: two-date change monitoring over the framed AOI.
+        if intent.scenario == "change":
+            change_request = ReportRequest(
+                task=intent.task,
+                region=intent.region,
+                prompt=intent.user_prompt,
+                session_id=request.session_id,
+                aoi=request.aoi,
+                before_time_range=request.before_time_range,
+                after_time_range=request.after_time_range,
+            )
+            state["request"] = change_request
+            try:
+                state["analysis"] = self.change_service.analyze(change_request)
+            except Exception as exc:
+                state["analysis"] = None
+                state["status"] = AgentStatus.NEEDS_INPUT
+                state["message"] = (
+                    "抱歉，这次建设扰动监测没能完成（可能是某个月份数据暂不可用或框选范围内无可用 patch）。"
+                    "你可以换月份或重新框选范围再试。"
+                )
+                state.setdefault("debug", {})["analysis_error"] = str(exc)
+            return state
+
+        # Scenario C: rank patches by 高硬化低绿地 pressure over the framed AOI.
+        if intent.scenario == "score":
+            score_request = ReportRequest(
+                task="补绿优先区评分",
+                region=intent.region,
+                prompt=intent.user_prompt,
+                time_range=intent.time_range,
+                session_id=request.session_id,
+                aoi=request.aoi,
+            )
+            state["request"] = score_request
+            try:
+                state["analysis"] = self.score_service.analyze(score_request)
+            except Exception as exc:
+                state["analysis"] = None
+                state["status"] = AgentStatus.NEEDS_INPUT
+                state["message"] = (
+                    "抱歉，这次补绿优先区评分没能完成（可能是该月份数据暂不可用或框选范围内无可用 patch）。"
+                    "你可以换个月份或重新框选范围再试。"
+                )
+                state.setdefault("debug", {})["analysis_error"] = str(exc)
+            return state
+
+        # Scenario A: aggregate a multi-task checkup over the framed AOI.
+        if intent.scenario == "checkup":
+            checkup_request = ReportRequest(
+                task="片区综合体检",
+                region=intent.region,
+                prompt=intent.user_prompt,
+                time_range=intent.time_range,
+                session_id=request.session_id,
+                aoi=request.aoi,
+            )
+            state["request"] = checkup_request
+            try:
+                state["analysis"] = self.checkup_service.analyze(checkup_request)
+            except Exception as exc:
+                state["analysis"] = None
+                state["status"] = AgentStatus.NEEDS_INPUT
+                state["message"] = (
+                    "抱歉，这次片区体检没能完成（可能是该月份数据暂不可用或框选范围内无可用 patch）。"
+                    "你可以换个月份或重新框选范围再试。"
+                )
+                state.setdefault("debug", {})["analysis_error"] = str(exc)
+            return state
+
         selected_patch_ids = request.selected_patch_ids
         aoi = request.aoi
         # If this turn brought no map selection (e.g. "换成建筑物提取"), keep the same
@@ -383,6 +598,9 @@ class ReportAgent:
                 "confirmation_fields": intent.confirmation_fields,
                 "confidence": intent.confidence,
                 "source": intent.source,
+                "scenario": intent.scenario,
+                "before_time_range": getattr(request, "before_time_range", ""),
+                "after_time_range": getattr(request, "after_time_range", ""),
             }
             pending_slots = intent.missing_fields or intent.confirmation_fields
         if state.get("status") == AgentStatus.CHAT:
