@@ -42,6 +42,9 @@ class ReportRequest:
     session_id: str = "default"
     selected_patch_ids: list[str] = field(default_factory=list)
     aoi: dict[str, Any] = field(default_factory=dict)
+    # Two-date window for change monitoring (scenario B). Empty for other flows.
+    before_time_range: str = ""
+    after_time_range: str = ""
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ReportRequest":
@@ -55,6 +58,8 @@ class ReportRequest:
             session_id=str(payload.get("session_id") or "default"),
             selected_patch_ids=[str(item) for item in (payload.get("selected_patch_ids") or []) if str(item).strip()],
             aoi=payload.get("aoi") if isinstance(payload.get("aoi"), dict) else {},
+            before_time_range=str(payload.get("before_time_range") or "").strip(),
+            after_time_range=str(payload.get("after_time_range") or "").strip(),
         )
 
 
@@ -69,6 +74,8 @@ class AgentIntent:
     confirmation_fields: list[str] = field(default_factory=list)
     confidence: float = 0.0
     source: str = "rule"
+    # Composite scenario (e.g. "checkup" 片区体检). Empty = ordinary single-task report.
+    scenario: str = ""
     debug: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -89,6 +96,11 @@ class ChartAsset:
     kind: str
     url: str
     caption: str
+    # When set, the frontend can georeference this image onto a map. bounds are
+    # WGS84 [min_lon, min_lat, max_lon, max_lat]; overlay marks it as an
+    # on-map result layer (vs. a plain inline figure).
+    bounds_wgs84: list[float] = field(default_factory=list)
+    overlay: bool = False
 
 
 @dataclass(slots=True)
@@ -154,6 +166,28 @@ def to_dict(obj: Any) -> Any:
     return obj
 
 
+def infer_two_months(prompt: str, today: date | None = None) -> tuple[str, str]:
+    """Extract an ordered (before, after) YYYY-MM pair from a phrase.
+
+    Handles "2025-12 到 2026-05", "2025年12月和2026年5月", etc. Returns the two
+    earliest-vs-latest distinct months found (sorted), or ("","") if fewer than
+    two are present. Used by the change-monitoring scenario.
+    """
+    text = (prompt or "").strip()
+    found: list[str] = []
+    # Explicit YYYY-MM tokens.
+    for m in re.finditer(r"(20\d{2})[-/.](0[1-9]|1[0-2])", text):
+        found.append(f"{m.group(1)}-{m.group(2)}")
+    # 年X月 tokens.
+    for m in re.finditer(r"(20\d{2})\s*年\s*(1[0-2]|0?[1-9])\s*月", text):
+        found.append(f"{m.group(1)}-{int(m.group(2)):02d}")
+    # Dedup preserving nothing but value, then sort chronologically.
+    uniq = sorted(set(found))
+    if len(uniq) < 2:
+        return ("", "")
+    return (uniq[0], uniq[-1])
+
+
 def infer_time_range(prompt: str, today: date | None = None) -> str:
     text = prompt.strip()
     current = today or date.today()
@@ -171,6 +205,11 @@ def infer_time_range(prompt: str, today: date | None = None) -> str:
         "十一": 11,
         "十二": 12,
     }
+
+    # Explicit YYYY-MM / YYYY/MM tokens win outright (e.g. "就看2025-12的").
+    iso = re.search(r"(20\d{2})[-/.](0[1-9]|1[0-2])", text)
+    if iso:
+        return f"{iso.group(1)}-{iso.group(2)}"
 
     year = current.year - 1 if "去年" in text else current.year
     if "前年" in text:
