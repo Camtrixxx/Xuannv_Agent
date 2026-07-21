@@ -351,52 +351,63 @@
     }
 
     .annotation-card {
-      border: 1px solid #fcd9a6;
-      background: #fff8ee;
-      border-radius: 12px;
-      padding: 14px 16px;
+      border: 1px solid #f2e3cb;
+      background: linear-gradient(180deg, #fffdfa 0%, #fff8ef 100%);
+      border-radius: 14px;
+      padding: 15px 17px;
       display: grid;
-      gap: 10px;
+      gap: 11px;
       width: 100%;
+      box-shadow: 0 1px 3px rgba(180, 130, 40, 0.06);
     }
 
     .annotation-card .anno-head {
       display: flex;
       align-items: center;
-      gap: 8px;
-      font-weight: 700;
-      color: #b45309;
+      gap: 9px;
+      font-weight: 650;
+      font-size: 14.5px;
+      color: #92400e;
+      letter-spacing: 0.2px;
+    }
+
+    .annotation-card .anno-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      height: 26px;
+      border-radius: 8px;
+      background: #fdefdb;
+      font-size: 14px;
+      flex-shrink: 0;
     }
 
     .annotation-card p {
       margin: 0;
-      color: #374151;
-      line-height: 1.5;
-    }
-
-    .annotation-meta {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      font-size: 12px;
-      color: var(--muted);
+      color: #5b6472;
+      font-size: 13px;
+      line-height: 1.65;
     }
 
     .anno-cta {
       display: inline-flex;
       align-items: center;
-      gap: 6px;
+      gap: 5px;
       align-self: start;
-      background: var(--primary);
+      background: #b45309;
       color: #fff;
       text-decoration: none;
-      font-weight: 700;
-      padding: 8px 16px;
-      border-radius: 8px;
-      transition: background 0.15s ease;
+      font-weight: 600;
+      font-size: 12.5px;
+      padding: 6px 13px;
+      border-radius: 999px;
+      transition: background 0.15s ease, transform 0.15s ease;
     }
 
-    .anno-cta:hover { background: #1d4ed8; }
+    .anno-cta:hover { background: #9a4708; }
+    .anno-cta .anno-arrow { transition: transform 0.15s ease; }
+    .anno-cta:hover .anno-arrow { transform: translateX(2px); }
     .anno-hint { font-size: 12px; color: var(--muted); }
 
     .report-figure {
@@ -1970,22 +1981,13 @@
       const action = payload.action || {};
       const url = action.url || "";
       const className = action.class_name || "该地物";
-      const modelType = action.model_type === "change_detection" ? "变化检测" : "单期识别";
-      const method = action.training_method || "";
-      const meta = [
-        `目标地物：${escapeHtml(className)}`,
-        `任务类型：${escapeHtml(modelType)}`,
-      ];
-      if (method) meta.push(`训练方式：${escapeHtml(method)}`);
       const cta = url
-        ? `<a class="anno-cta" href="${escapeHtml(url)}" target="_blank" rel="noopener">前往标注页 →</a>
-           <div class="anno-hint">在新标签页完成标注与训练后，回到这里对我说“标注好了”即可继续这次分析。</div>`
-        : `<div class="anno-hint">未拿到标注入口链接，请稍后重试或联系管理员。</div>`;
+        ? `<a class="anno-cta" href="${escapeHtml(url)}" target="_blank" rel="noopener">前往标注 <span class="anno-arrow">→</span></a>`
+        : `<div class="anno-hint">暂未拿到标注入口，请稍后重试。</div>`;
       return `
         <div class="annotation-card">
-          <div class="anno-head"><span>🖊️</span><span>需要先标注这个新地物</span></div>
+          <div class="anno-head"><span class="anno-icon">🖊️</span><span>「${escapeHtml(className)}」需要先标注</span></div>
           <p>${escapeHtml(payload.message || `『${className}』不是内置地物，需要先标注少量样本再训练。`)}</p>
-          <div class="annotation-meta">${meta.map((m) => `<span class="intent-pill">${m}</span>`).join("")}</div>
           ${cta}
         </div>
       `;
