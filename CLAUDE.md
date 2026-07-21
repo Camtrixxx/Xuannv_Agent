@@ -68,10 +68,10 @@ load_memory → parse_intent → merge_memory → route → ...
 ```
 
 - **load_memory**: Reads SQLite session state, appends user message
-- **parse_intent**: Rules-first classification (IntentService) with DeepSeek LLM fallback; classifies as `report_request`, `slot_fill`, `free_chat`, `change_context`, `confirmation`, or `follow_up` (a question/discussion about the already-generated report — cued by 详细/解释/为什么/这个结论… when no new task or month is named)
-- **merge_memory**: Merges new slots with historical slots; if a previous month exists but user didn't specify one on a new report request, it is silently reused (the previous two-step confirmation flow was removed). Clarification is only asked when no month is available at all.
+- **parse_intent**: Rules-first classification (IntentService) with DeepSeek LLM fallback; classifies as `report_request`, `slot_fill`, `free_chat`, `change_context`, `confirmation`, or `follow_up` (a question/discussion about the already-generated report — cued by 详细/解释/为什么/这个结论… when no new task or month is named). Also deterministically sets `AgentIntent.scenario` (`checkup`/`change`/`score`) for the Haidian composite scenarios from keyword cues; questions are excluded (they stay discussion). An imperative scenario ask is kept rules-first (high confidence) so it doesn't defer to the LLM and get reclassified
+- **merge_memory**: Merges new slots with historical slots; if a previous month exists but user didn't specify one on a new report request, it is silently reused (the previous two-step confirmation flow was removed). Clarification is only asked when no month is available at all. Scenario turns branch first: `checkup`/`score` need month + AOI (shared `_merge_month_aoi`), `change` needs two months + AOI (`_merge_change`); scenarios are sticky across slot-fill turns
 - **route**: Branches to `ask_clarification` (no month available), `chat_response` (casual chat), or `run_analysis` (all slots filled). There is no longer an `ask_confirmation` branch — the `AgentRoute.ASK_CONFIRMATION` / `AgentStatus.NEEDS_CONFIRMATION` constants remain defined but are unused
-- **run_analysis**: Dispatches to regional analysis service
+- **run_analysis**: Dispatches by `intent.scenario` to `RegionCheckupService` / `ChangeMonitorService` / `PressureScoreService` (Haidian composite scenarios), otherwise to `RegionalAnalysisService` (ordinary single-task reports)
 - **generate_report**: Builds HTML/Markdown via ReportService + DeepSeek
 - **write_memory**: Persists slots, summary, messages, and report index back to SQLite
 
@@ -99,6 +99,9 @@ All services accept dependency-injected configs and collaborators, defaulting to
 | `AEFAnalysisService` | HTTP client to the AEF inference service (`AGENT_AEF_BASE_URL`, default `:7862`). Sends `POST /api/infer` with `sample_indices` + `task`; downloads result PNGs to `agent/reports/assets/`. Patch selection: if the request carries `selected_patch_ids` (from the frontend map), `patch_000040` → AEF `sample_index=40`; otherwise falls back to a deterministic pick from hardcoded pools |
 | `HarbinEmbeddingAnalysisService` | HTTP client to Harbin embedding API (`AGENT_EMBEDDING_API_BASE_URL`). Three task modes: pre-generated static results (building, land use), real-time system model inference (building, water), and embedding preview images. Validates against a hardcoded month allowlist. Patch selection prefers frontend `selected_patch_ids`, then re-selects from the request AOI bbox, then a stable global pick |
 | `HaidianEmbeddingAnalysisService` | HTTP client to Haidian embedding API (same base URL, `/regions/haidian/...`). Tasks: building/road extraction, construction, land use / land cover classification, water extraction. Uses the patch-level thematic **result PNG** endpoint (`system-models` inference is not yet open for Haidian) plus an embedding preview; lightweight image stats are derived from the result PNG |
+| `RegionCheckupService` | **Scenario A (片区综合体检, Haidian).** Over one framed AOI + month, aggregates 4 binary-task coverages + land-cover class distribution into one `AnalysisResult`. Uses `agent/tools/aoi.py` + `classmap`. `scenario="checkup"` |
+| `ChangeMonitorService` | **Scenario B (建设扰动短周期监测, Haidian).** One AOI, one binary task (default 施工), two months → per-patch pixel-level diff of the aligned result PNGs, aggregated to gained/lost/net area. Uses `agent/tools/change.py` + `AoiCoverService.fetch_result_array`. `scenario="change"` |
+| `PressureScoreService` | **Scenario C (高硬化低绿地压力评分 / 补绿优先区, Haidian).** Per patch scores built-up (impervious, from building task) against green deficit (from land-cover), ranks TOP-N补绿 priority zones. Uses `agent/tools/scoring.py`. `scenario="score"`. Green ratio is advisory (land-cover model), flagged in report limitations |
 | `PatchSelectionService` | Backs `POST /api/patches/search`. Given a frontend map bbox + region + task + month, returns candidate patches ranked by bbox-intersection score. Yajiang uses the local `YajiangPatchIndexService`; Harbin/Haidian query the remote embedding API's `/regions/{id}/patches` |
 | `YajiangPatchIndexService` | Builds a local spatial index of Yajiang raw GeoTIFF patches by parsing GeoTIFF tags directly (no rasterio — only `pyproj` for CRS→WGS84). Reads from `downloads/xuannv_embeddings/extracted/raw/yajiang`, caches the index to `agent/runtime/yajiang_patch_index.json` |
 | `MockAnalysisService` | Deterministic placeholder with matplotlib bar charts; used when no real service is configured or as fallback |
@@ -122,9 +125,13 @@ A standalone FastAPI service that loads a PyTorch deploy model and exposes REST 
 - DEM outputs separate "user display" charts (hillshade, contours, elevation zones, slope, profile) from "model validation" charts (target/prediction/error comparison)
 - Landcover class mapping follows a custom WorldCover remapping defined in `data/full_npy/preprocess_meta.json`
 
+### Pure-function Tools (`agent/tools/`)
+
+Side-effect-free, independently unit-tested analysis atoms the Haidian scenario services compose (no network, no config). `raster` (binary coverage + hectares from bounds), `classmap` (multi-class distribution from a legend), `aoi` (aggregate coverage / class distribution across an AOI's patches), `change` (pixel-level two-date mask diff → gained/lost/net + aggregate), `scoring` (0–100 pressure score, patch ranking, roll-up). `AoiCoverService.iter_patch_colors` / `fetch_result_array` are the shared fetch loops feeding them.
+
 ### Data Schemas (`agent/schemas/report.py`)
 
-- **ReportRequest**: `task`, `region`, `prompt`, `time_range` (YYYY-MM), `session_id`, `selected_patch_ids` (frontend map-selected patches), `aoi` (bbox selection)
+- **ReportRequest**: `task`, `region`, `prompt`, `time_range` (YYYY-MM), `session_id`, `selected_patch_ids` (frontend map-selected patches), `aoi` (bbox selection), `before_time_range`/`after_time_range` (scenario B two-date window)
 - **AgentIntent**: Parsed intent with `message_type`, extracted slots, `confidence`, `missing_fields`, `confirmation_fields`. `is_complete` is True when nothing missing and nothing to confirm
 - **AnalysisResult**: Structured analysis with metrics, findings, charts, narrative blocks, risks, limitations
 - **ReportArtifact**: Output paths (`html_url`, `markdown_url`), sections, reuse flag
