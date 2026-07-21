@@ -102,29 +102,39 @@ def test_live_custom_infer_roundtrip():
     from agent.services.aoi_cover_service import AoiCoverService
     from agent.services.model_registry_service import ModelRegistryService
 
-    # Discover a ready single_time_detection custom model on whatever backend is
-    # configured (env AGENT_EMBEDDING_API_BASE_URL) — do not hardcode an id.
-    reg = ModelRegistryService()
-    ready = [
-        m for m in reg.custom_models("haidian")
-        if m.is_ready and m.type == "single_time_detection"
-    ]
-    if not ready:
-        pytest.skip("no ready single_time_detection custom model on this backend")
-    model_id = ready[0].id
-
     svc = AoiCoverService()
-    # Try a few patches; infer may legitimately return nothing (e.g. the
-    # backend's stored model/embedding versions mismatch, or a month has no
-    # embedding). That is a backend/data condition, not a fault in our fetch →
-    # infer → PNG → mask path, so skip rather than fail.
+    patches = ("patch_000100", "patch_000000", "patch_000010", "patch_000050")
+
+    def _infer_any(model_id):
+        for pid in patches:
+            a = svc.fetch_result_array("haidian", pid, "custom", "202512", model_id=model_id)
+            if a is not None:
+                return a
+        return None
+
+    # Deterministic proof: point AGENT_LIVE_MODEL_ID at a known-good model on the
+    # configured backend (e.g. model_6360bb31 on the remote). Otherwise discover
+    # ready single_time models and scan a bounded budget — the backend hosts many
+    # broken models (stored-model vs patch-embedding version mismatch), so a
+    # working one is sparse; a miss is a backend/data condition, so skip.
     arr = None
-    for pid in ("patch_000100", "patch_000000", "patch_000010", "patch_000050"):
-        arr = svc.fetch_result_array("haidian", pid, "custom", "202512", model_id=model_id)
-        if arr is not None:
-            break
-    if arr is None:
-        pytest.skip(f"backend could not infer {model_id} on any probed patch (data/version condition)")
+    pinned = os.getenv("AGENT_LIVE_MODEL_ID")
+    if pinned:
+        arr = _infer_any(pinned)
+        if arr is None:
+            pytest.skip(f"pinned model {pinned} could not infer (data/version condition)")
+    else:
+        reg = ModelRegistryService()
+        ready = [m for m in reg.custom_models("haidian")
+                 if m.is_ready and m.type == "single_time_detection"]
+        if not ready:
+            pytest.skip("no ready single_time_detection custom model on this backend")
+        for m in ready[:40]:
+            arr = _infer_any(m.id)
+            if arr is not None:
+                break
+        if arr is None:
+            pytest.skip("no scanned ready model could infer (backend data/version condition)")
     assert arr.shape == (128, 128, 3)
     mask = custom_model_mask(arr)
     assert mask.dtype == bool

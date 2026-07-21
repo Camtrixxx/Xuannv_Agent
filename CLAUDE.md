@@ -71,7 +71,8 @@ load_memory → parse_intent → merge_memory → route → ...
 - **parse_intent**: Rules-first classification (IntentService) with DeepSeek LLM fallback; classifies as `report_request`, `slot_fill`, `free_chat`, `change_context`, `confirmation`, or `follow_up` (a question/discussion about the already-generated report — cued by 详细/解释/为什么/这个结论… when no new task or month is named). Also deterministically sets `AgentIntent.scenario` (`checkup`/`change`/`score`) for the Haidian composite scenarios from keyword cues; questions are excluded (they stay discussion). An imperative scenario ask is kept rules-first (high confidence) so it doesn't defer to the LLM and get reclassified
 - **merge_memory**: Merges new slots with historical slots; if a previous month exists but user didn't specify one on a new report request, it is silently reused (the previous two-step confirmation flow was removed). Clarification is only asked when no month is available at all. Scenario turns branch first: `checkup`/`score` need month + AOI (shared `_merge_month_aoi`), `change` needs two months + AOI (`_merge_change`); scenarios are sticky across slot-fill turns
 - **route**: Branches to `ask_clarification` (no month available), `chat_response` (casual chat), or `run_analysis` (all slots filled). There is no longer an `ask_confirmation` branch — the `AgentRoute.ASK_CONFIRMATION` / `AgentStatus.NEEDS_CONFIRMATION` constants remain defined but are unused
-- **run_analysis**: Dispatches by `intent.scenario` to `RegionCheckupService` / `ChangeMonitorService` / `PressureScoreService` (Haidian composite scenarios), otherwise to `RegionalAnalysisService` (ordinary single-task reports)
+- **capability gate** (inside `merge_memory`, before scenario slot logic): if the turn names a **non-native** object (湿地/机场/…), `CapabilityService.resolve` decides — `custom_ready` sets `intent.custom_model_id` and falls through; `custom_training` returns `needs_input` (wait); `custom_failed`/`needs_annotation` return `needs_annotation` with an `open_annotation_ui` `action` and persist `pending_custom_model`. If a pending model exists, the next turn re-verifies its **real** status (never trusts “好了”) and resumes the original task or re-offers the handoff
+- **run_analysis**: Dispatches by `intent.scenario` to `RegionCheckupService` / `ChangeMonitorService` / `PressureScoreService` (Haidian composite scenarios), otherwise to `RegionalAnalysisService` (ordinary single-task reports). A resolved `custom_model_id` makes `ChangeMonitorService` run the custom model via `POST /models/{id}/infer` per patch (target=class colour on grey background) instead of the system-task result endpoint
 - **generate_report**: Builds HTML/Markdown via ReportService + DeepSeek
 - **write_memory**: Persists slots, summary, messages, and report index back to SQLite
 
@@ -102,6 +103,8 @@ All services accept dependency-injected configs and collaborators, defaulting to
 | `RegionCheckupService` | **Scenario A (片区综合体检, Haidian).** Over one framed AOI + month, aggregates 4 binary-task coverages + land-cover class distribution into one `AnalysisResult`. Uses `agent/tools/aoi.py` + `classmap`. `scenario="checkup"` |
 | `ChangeMonitorService` | **Scenario B (建设扰动短周期监测, Haidian).** One AOI, one binary task (default 施工), two months → per-patch pixel-level diff of the aligned result PNGs, aggregated to gained/lost/net area. Uses `agent/tools/change.py` + `AoiCoverService.fetch_result_array`. `scenario="change"` |
 | `PressureScoreService` | **Scenario C (高硬化低绿地压力评分 / 补绿优先区, Haidian).** Per patch scores built-up (impervious, from building task) against green deficit (from land-cover), ranks TOP-N补绿 priority zones. Uses `agent/tools/scoring.py`. `scenario="score"`. Green ratio is advisory (land-cover model), flagged in report limitations |
+| `ModelRegistryService` | Read-only wrapper over embedding-api `GET /models` (+ `/models/{id}`, `/models/jobs/{id}`), cached per region. Splits results into `system` vs `custom` (native taxonomy), exposes `find_custom_models(region, class_name)` and `ModelInfo.is_ready/is_training/is_failed`. Never trains or annotates |
+| `CapabilityService` | Capability gate in front of `run_analysis`. `resolve(region, object)` classifies a requested analysis object into `native` (built-in task/land-cover class → proceed), `custom_ready` (trained model → proceed with `model_id`), `custom_training` (ask to wait), `custom_failed` (say training failed, offer retry), or `needs_annotation` (hand off to标注). Also builds the `open_annotation_ui` handoff `action`. Uses `agent/taxonomy.py` native/non-native word lists |
 | `PatchSelectionService` | Backs `POST /api/patches/search`. Given a frontend map bbox + region + task + month, returns candidate patches ranked by bbox-intersection score. Yajiang uses the local `YajiangPatchIndexService`; Harbin/Haidian query the remote embedding API's `/regions/{id}/patches` |
 | `YajiangPatchIndexService` | Builds a local spatial index of Yajiang raw GeoTIFF patches by parsing GeoTIFF tags directly (no rasterio — only `pyproj` for CRS→WGS84). Reads from `downloads/xuannv_embeddings/extracted/raw/yajiang`, caches the index to `agent/runtime/yajiang_patch_index.json` |
 | `MockAnalysisService` | Deterministic placeholder with matplotlib bar charts; used when no real service is configured or as fallback |
@@ -131,7 +134,8 @@ Side-effect-free, independently unit-tested analysis atoms the Haidian scenario 
 
 ### Data Schemas (`agent/schemas/report.py`)
 
-- **ReportRequest**: `task`, `region`, `prompt`, `time_range` (YYYY-MM), `session_id`, `selected_patch_ids` (frontend map-selected patches), `aoi` (bbox selection), `before_time_range`/`after_time_range` (scenario B two-date window)
+- **ReportRequest**: `task`, `region`, `prompt`, `time_range` (YYYY-MM), `session_id`, `selected_patch_ids` (frontend map-selected patches), `aoi` (bbox selection), `before_time_range`/`after_time_range` (scenario B two-date window), `custom_model_id`/`target_object` (custom-model analysis of a non-native object)
+- **AgentResponse**: adds `action` (`{}` normally; an `open_annotation_ui` handoff instruction when `status=needs_annotation`). New status `needs_annotation`
 - **AgentIntent**: Parsed intent with `message_type`, extracted slots, `confidence`, `missing_fields`, `confirmation_fields`. `is_complete` is True when nothing missing and nothing to confirm
 - **AnalysisResult**: Structured analysis with metrics, findings, charts, narrative blocks, risks, limitations
 - **ReportArtifact**: Output paths (`html_url`, `markdown_url`), sections, reuse flag
@@ -182,8 +186,8 @@ tests/           pytest units for the deterministic, network-free helpers
 aef_inference/
   server.py      FastAPI app exposing /api/infer, /api/patch-rgb, /api/health, /api/meta
   runner.py      Model loading, inference, visualization, caching (1436 lines)
-docs/            Product/planning docs: capability-boundary analysis (10m 底座场景边界)
-                 and the development plan (海淀三场景与架构演进)
+docs/            Product/planning docs: capability-boundary analysis (10m 底座场景边界),
+                 the development plans (海淀三场景与架构演进; 自定义地物标注与训练能力)
 scripts/         start/stop/status shell scripts for Agent, AEF, and both together
 ```
 
