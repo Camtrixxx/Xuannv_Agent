@@ -350,6 +350,55 @@
       background: #f8fafc;
     }
 
+    .annotation-card {
+      border: 1px solid #fcd9a6;
+      background: #fff8ee;
+      border-radius: 12px;
+      padding: 14px 16px;
+      display: grid;
+      gap: 10px;
+      width: 100%;
+    }
+
+    .annotation-card .anno-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700;
+      color: #b45309;
+    }
+
+    .annotation-card p {
+      margin: 0;
+      color: #374151;
+      line-height: 1.5;
+    }
+
+    .annotation-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .anno-cta {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      align-self: start;
+      background: var(--primary);
+      color: #fff;
+      text-decoration: none;
+      font-weight: 700;
+      padding: 8px 16px;
+      border-radius: 8px;
+      transition: background 0.15s ease;
+    }
+
+    .anno-cta:hover { background: #1d4ed8; }
+    .anno-hint { font-size: 12px; color: var(--muted); }
+
     .report-figure {
       margin: 0;
       border: 1px solid var(--line);
@@ -1917,6 +1966,31 @@
       `;
     }
 
+    function renderAnnotation(payload) {
+      const action = payload.action || {};
+      const url = action.url || "";
+      const className = action.class_name || "该地物";
+      const modelType = action.model_type === "change_detection" ? "变化检测" : "单期识别";
+      const method = action.training_method || "";
+      const meta = [
+        `目标地物：${escapeHtml(className)}`,
+        `任务类型：${escapeHtml(modelType)}`,
+      ];
+      if (method) meta.push(`训练方式：${escapeHtml(method)}`);
+      const cta = url
+        ? `<a class="anno-cta" href="${escapeHtml(url)}" target="_blank" rel="noopener">前往标注页 →</a>
+           <div class="anno-hint">在新标签页完成标注与训练后，回到这里对我说“标注好了”即可继续这次分析。</div>`
+        : `<div class="anno-hint">未拿到标注入口链接，请稍后重试或联系管理员。</div>`;
+      return `
+        <div class="annotation-card">
+          <div class="anno-head"><span>🖊️</span><span>需要先标注这个新地物</span></div>
+          <p>${escapeHtml(payload.message || `『${className}』不是内置地物，需要先标注少量样本再训练。`)}</p>
+          <div class="annotation-meta">${meta.map((m) => `<span class="intent-pill">${m}</span>`).join("")}</div>
+          ${cta}
+        </div>
+      `;
+    }
+
     function renderClarification(payload) {
       return `
         <div class="report-card">
@@ -1966,6 +2040,11 @@
           if (payload.status === "chat") {
             messages.removeChild(messages.lastElementChild);
             addMessage(`<p>${escapeHtml(payload.message || "我在。")}</p>`, "agent");
+            return;
+          }
+          if (payload.status === "needs_annotation") {
+            messages.removeChild(messages.lastElementChild);
+            addMessage(renderAnnotation(payload), "agent");
             return;
           }
           throw new Error(payload.detail || payload.error || payload.message || "报告生成失败");
