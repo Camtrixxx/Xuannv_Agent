@@ -1,80 +1,38 @@
-"""Single source of truth for which months each region can actually analyze.
+"""Region month/task availability checks used for friendly pre-validation.
 
-Used for pre-validation in the agent so an unavailable month is turned into a
-friendly clarification *before* any model/API call — instead of surfacing a raw
-upstream HTTP error to the user.
-
-Coverage sources:
-- Yajiang: local AEF quarterly imagery 2023Q1–2026Q1 (verified against the
-  running inference service), i.e. months 2023-01 through 2026-03.
-- Harbin / Haidian: the embedding-api docs at
-  https://github.com/go-bananas-wwj/embedding-api (docs/API.md).
+The vocabulary itself (which months/tasks each region has) lives in
+``agent.taxonomy``; this module is the thin query/validation layer the agent
+calls so an unavailable month becomes a clarification *before* any upstream
+API call — instead of surfacing a raw HTTP error to the user.
 """
 
 from __future__ import annotations
 
+from agent.taxonomy import (
+    HAIDIAN_MONTHS,
+    HARBIN_MONTHS,
+    REGION_COVERAGE_HINT,
+    REGION_MONTHS,
+    REGION_TASKS,
+    YAJIANG_MONTHS,
+    resolve_region_id,
+)
 
-def _months_between(start: str, end: str) -> list[str]:
-    sy, sm = (int(x) for x in start.split("-"))
-    ey, em = (int(x) for x in end.split("-"))
-    out: list[str] = []
-    year, month = sy, sm
-    while (year, month) <= (ey, em):
-        out.append(f"{year:04d}-{month:02d}")
-        month += 1
-        if month > 12:
-            month = 1
-            year += 1
-    return out
-
-
-# Yajiang AEF: quarterly imagery 2023Q1..2026Q1 -> every month in that span.
-YAJIANG_MONTHS = _months_between("2023-01", "2026-03")
-# Harbin embedding-api: explicit available_months from live patch metadata/API docs.
-HARBIN_MONTHS = [
-    "2025-04",
-    "2025-06",
-    "2025-08",
-    "2025-09",
-    "2025-10",
-    "2026-01",
-    "2026-02",
-    "2026-03",
-    "2026-04",
-    "2026-05",
+__all__ = [
+    "HAIDIAN_MONTHS",
+    "HARBIN_MONTHS",
+    "YAJIANG_MONTHS",
+    "REGION_COVERAGE_HINT",
+    "REGION_MONTHS",
+    "REGION_TASKS",
+    "resolve_region_id",
+    "available_months",
+    "region_tasks",
+    "coverage_hint",
+    "is_month_available",
+    "format_month_zh",
+    "unavailable_message",
 ]
-# Haidian embedding-api v1: 202512..202605 per the API docs.
-HAIDIAN_MONTHS = _months_between("2025-12", "2026-05")
-
-REGION_MONTHS: dict[str, list[str]] = {
-    "yajiang": YAJIANG_MONTHS,
-    "harbin": HARBIN_MONTHS,
-    "haidian": HAIDIAN_MONTHS,
-}
-
-REGION_COVERAGE_HINT: dict[str, str] = {
-    "yajiang": "雅江区域目前可分析 2023 年 1 月至 2026 年 3 月（按季度更新）",
-    "harbin": "哈尔滨新区目前可分析 2025 年 4、6、8、9、10 月，以及 2026 年 1 至 5 月",
-    "haidian": "北京市海淀区目前可分析 2025 年 12 月至 2026 年 5 月",
-}
-
-# User-facing task names each region supports (all recognized by the intent parser).
-REGION_TASKS: dict[str, list[str]] = {
-    "yajiang": ["地物分类", "水体分布", "高程地形"],
-    "harbin": ["建筑物提取", "土地利用分类", "水体提取"],
-    "haidian": ["建筑物提取", "道路提取", "施工识别", "土地利用分类", "土地覆盖分类", "水体提取"],
-}
-
-
-def resolve_region_id(region: str) -> str:
-    text = str(region or "")
-    if "哈尔滨" in text or text.lower() in {"harbin", "harbin_new_area"}:
-        return "harbin"
-    if "海淀" in text or text.lower() in {"haidian", "beijing_haidian"}:
-        return "haidian"
-    if "雅江" in text or text.lower() == "yajiang":
-        return "yajiang"
-    return "yajiang"
 
 
 def available_months(region: str) -> list[str]:
