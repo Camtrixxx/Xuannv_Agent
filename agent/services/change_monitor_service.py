@@ -16,6 +16,7 @@ from agent.config import EmbeddingAPIConfig, ReportConfig
 from agent.schemas.report import AnalysisResult, MetricCard, ReportRequest
 from agent.services.aoi_cover_service import AoiCoverService
 from agent.services.haidian_embedding_service import TASK_DISPLAY, TASK_TO_HAIDIAN
+from agent.services.model_registry_service import ModelRegistryService
 from agent.services.patch_selection_service import PatchSelectionService
 from agent.services.satellite_basemap import basemap_chart
 from agent.tools.change import aggregate_change, binary_change, custom_model_mask, mask_for_task
@@ -34,6 +35,7 @@ class ChangeMonitorService:
         report_config: ReportConfig | None = None,
         aoi_cover: AoiCoverService | None = None,
         patch_selection: PatchSelectionService | None = None,
+        registry: ModelRegistryService | None = None,
     ) -> None:
         self.config = config or EmbeddingAPIConfig()
         self.report_config = report_config or ReportConfig()
@@ -41,6 +43,7 @@ class ChangeMonitorService:
         self.asset_dir.mkdir(parents=True, exist_ok=True)
         self.patch_selection = patch_selection or PatchSelectionService(self.config)
         self.aoi_cover = aoi_cover or AoiCoverService(self.config, self.patch_selection)
+        self.registry = registry or ModelRegistryService(self.config)
 
     def analyze(self, request: ReportRequest) -> AnalysisResult:
         region_id = "haidian"
@@ -65,7 +68,12 @@ class ChangeMonitorService:
         agg = aggregate_change(per_patch)
         if agg["patch_count"] == 0:
             raise RuntimeError("两期结果均无法获取，无法计算变化。请更换月份或范围。")
-        return self._build_result(request, task_id, before, after, agg, rows, model_id, custom_class)
+        # Look up the custom model's training metadata once so the report can be
+        # honest about method + feature source (and warn on AEF annual features).
+        model_info = self.registry.model_status(model_id, region_id) if model_id else None
+        return self._build_result(
+            request, task_id, before, after, agg, rows, model_id, custom_class, model_info
+        )
 
     def _resolve_task(self, task: str) -> str:
         task_id = TASK_TO_HAIDIAN.get(task, "")
@@ -138,7 +146,7 @@ class ChangeMonitorService:
         rows.sort(key=lambda r: (r["net_ha"] if r["net_ha"] is not None else 0), reverse=True)
         return per_patch, rows
 
-    def _build_result(self, request, task_id, before, after, agg, rows, model_id="", custom_class="") -> AnalysisResult:
+    def _build_result(self, request, task_id, before, after, agg, rows, model_id="", custom_class="", model_info=None) -> AnalysisResult:
         region = "北京市海淀区"
         # Custom-model runs show the user's own class name; native runs use the
         # built-in task display name.
@@ -189,8 +197,8 @@ class ChangeMonitorService:
                 },
             ],
             risks=self._risks(agg),
-            method_notes=self._method_notes(task_id, before, after, model_id, name),
-            limitations=self._limitations(model_id),
+            method_notes=self._method_notes(task_id, before, after, model_id, name, model_info),
+            limitations=self._limitations(model_id, before, after, model_info),
             confidence_notes=[
                 "两期专题结果均来自在线海淀 embedding-api，PNG 逐像素对齐（128×128）。",
                 "变化统计为 Agent 从结果图计算的轻量指标，正式评估仍需接入标签或评估接口。",
@@ -235,12 +243,45 @@ class ChangeMonitorService:
             return ["新增与减少面积相当，可能包含较多模型逐期抖动导致的伪变化，解读需谨慎。"]
         return []
 
-    def _method_notes(self, task_id, before, after, model_id, name) -> list[str]:
+    # Human-readable labels for the backend's training-method / feature codes.
+    _METHOD_LABEL = {
+        "xuannv_earth": "玄女地球 embedding", "traditional_ml": "传统 S2+随机森林",
+        "aef": "AEF 年度特征+MLP", "dinov3_sat493m": "DINOv3-SAT493M+MLP",
+        "pu_query_retrieval": "PU+Query 相似度召回", "binary_conv3x3": "Binary Conv 3x3 few-shot",
+        "random_forest": "随机森林", "pixel_mlp": "像素级 MLP",
+    }
+    _FEATURE_LABEL = {
+        "xuannv_embedding": "玄女地球 embedding", "sentinel2_l2a": "Sentinel-2 L2A 光学",
+        "aef": "AEF 年度特征", "dinov3_sat493m": "DINOv3-SAT493M 特征",
+    }
+
+    def _model_method_note(self, model_info) -> str:
+        """One sentence describing how the custom model was actually trained."""
+        if model_info is None:
+            return "该地物由少量标注样本训练/相似度召回得到。"
+        method = self._METHOD_LABEL.get(
+            model_info.resolved_training_method or model_info.requested_training_method, ""
+        )
+        feature = self._FEATURE_LABEL.get(model_info.feature_source, model_info.feature_source or "")
+        bits = []
+        if feature:
+            bits.append(f"特征来源：{feature}")
+        if method:
+            bits.append(f"训练算法：{method}")
+        if model_info.n_samples:
+            bits.append(f"有效标注 {model_info.n_samples} 个多边形")
+        if model_info.accuracy is not None:
+            metric = model_info.metric_name or "训练集指标"
+            bits.append(f"{metric}≈{model_info.accuracy:.3f}（训练集，非泛化精度）")
+        return "自定义模型：" + "；".join(bits) + "。" if bits else "该地物由自定义模型识别。"
+
+    def _method_notes(self, task_id, before, after, model_id, name, model_info=None) -> list[str]:
         if model_id:
             return [
                 f"Agent 将请求识别为『{name}·建设扰动监测』（非内置地物），使用自定义模型 {model_id}。",
                 f"调用海淀 embedding-api：{self.config.base_url}，逐 patch 用 POST /models/{model_id}/infer 出两期结果再做像素级 diff。",
                 "自定义模型输出为“目标类=类别色、背景=灰底”的二值图；变化＝两期目标前景掩膜的逐像素差。",
+                self._model_method_note(model_info),
             ]
         return [
             f"Agent 将请求识别为『建设扰动监测』场景，region=haidian、task={task_id}、{before}→{after}。",
@@ -248,7 +289,13 @@ class ChangeMonitorService:
             "变化＝两期二值前景掩膜的逐像素差；面积按整块 patch 的 UTM 面积换算。",
         ]
 
-    def _limitations(self, model_id) -> list[str]:
+    @staticmethod
+    def _same_year(before: str, after: str) -> bool:
+        digits = lambda m: "".join(ch for ch in str(m) if ch.isdigit())
+        b, a = digits(before), digits(after)
+        return len(b) >= 4 and len(a) >= 4 and b[:4] == a[:4]
+
+    def _limitations(self, model_id, before="", after="", model_info=None) -> list[str]:
         common = [
             "变化来自两期模型输出之差，模型逐期误差会叠加为伪变化，显著斑块建议实地核验。",
             "面积按整块 patch 聚合，AOI 边界未做像素级裁剪，边缘片区略有高估。",
@@ -258,4 +305,14 @@ class ChangeMonitorService:
                 0,
                 "该地物由少量标注样本训练/相似度召回得到，精度仅供参考，不代表官方产品级结果。",
             )
+            # AEF features are per-year: two months in the same year share one
+            # annual embedding, so their model outputs are identical → any
+            # "change" would be spurious. Warn loudly rather than report zeros.
+            if model_info is not None and model_info.uses_annual_feature and self._same_year(before, after):
+                common.insert(
+                    0,
+                    "⚠️ 该模型使用 AEF 年度特征，同一年内各月份共用同一年度 embedding，"
+                    "因此本次同年两期对比的模型输出实际相同，变化结果无意义；"
+                    "如需年内变化，请改用玄女地球/DINOv3 特征训练的模型，或改为跨年度对比。",
+                )
         return common

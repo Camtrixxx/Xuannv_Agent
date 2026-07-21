@@ -106,20 +106,26 @@ Frontend
   "message": "『湿地』不是内置地物，需要先在标注页标注少量样本再训练……",
   "action": {
     "type": "open_annotation_ui",
-    "url": "http://<embedding-api-base>/models/new?region_id=haidian&class=湿地&model_type=single_time_detection&month=202512",
+    "url": "http://<embedding-api-base>/models/new?region_id=haidian&class=湿地&model_type=single_time_detection&training_method=xuannv_earth&month=202512",
     "class_name": "湿地",
     "model_type": "single_time_detection",
-    "params": { "region_id": "haidian", "class": "湿地", "model_type": "single_time_detection", "month": "202512" }
+    "training_method": "xuannv_earth",
+    "task_contract": { "temporal_mode": "single", "required_fields": ["month"] },
+    "params": { "region_id": "haidian", "class": "湿地", "model_type": "single_time_detection", "training_method": "xuannv_earth", "month": "202512" }
   }
 }
 ```
+
+`training_method` 与 `task_contract` 来自后端 `GET /models/capabilities?region_id=`（Agent 每区缓存查询），取该区 `default_training_method`（当前为 `xuannv_earth`）和对应任务的时相契约；capabilities 不可达时回退到内置默认。**Agent 不暴露训练法选择器**，该字段仅为信息性——训练统一走后端默认方式。
 
 字段说明：
 
 | 字段 | 含义 |
 | --- | --- |
 | `type` | 指令类型，目前只有 `open_annotation_ui`。前端据此决定处理方式 |
-| `url` | 标注页深链，已带好 `region_id / class / model_type`（可选 `month`）。基址取环境变量 `AGENT_ANNOTATION_UI_BASE`（默认与 embedding-api 同址）|
+| `url` | 标注页深链，已带好 `region_id / class / model_type / training_method`（可选 `month`）。基址取环境变量 `AGENT_ANNOTATION_UI_BASE`（默认与 embedding-api 同址）|
+| `training_method` | 该区默认训练方式（`xuannv_earth`），信息性字段，来自 capabilities |
+| `task_contract` | 该任务的时相契约：`temporal_mode`(single/pair) + `required_fields`，来自 capabilities |
 | `class_name` | 待标注/训练的目标类名（=用户所说的非内置地物）|
 | `model_type` | `single_time_detection`（单期）或 `change_detection`（换检）|
 | `params` | 组成 `url` 的原始参数，前端也可用它自行拼链 |

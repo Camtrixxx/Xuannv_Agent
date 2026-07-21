@@ -36,7 +36,21 @@ class ModelInfo:
     status: str
     source: str  # "system" | "custom"
     classes: list[dict[str, Any]] = field(default_factory=list)
+    # Enriched training metadata (present on the updated backend; "" / None when
+    # absent, e.g. old or system models).
+    resolved_training_method: str = ""   # pu_query_retrieval | binary_conv3x3 | random_forest | pixel_mlp
+    requested_training_method: str = ""  # xuannv_earth | traditional_ml | aef | dinov3_sat493m
+    feature_source: str = ""             # xuannv_embedding | sentinel2_l2a | aef | dinov3_sat493m
+    accuracy: float | None = None
+    metric_name: str = ""
+    n_samples: int | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def uses_annual_feature(self) -> bool:
+        """AEF features are per-year: months within one year share an embedding,
+        so same-year change detection on such a model is meaningless."""
+        return self.feature_source == "aef"
 
     @property
     def is_ready(self) -> bool:
@@ -64,6 +78,12 @@ class ModelInfo:
             status=str(payload.get("status") or ""),
             source=str(payload.get("source") or ""),
             classes=list(payload.get("classes") or []),
+            resolved_training_method=str(payload.get("resolved_training_method") or ""),
+            requested_training_method=str(payload.get("requested_training_method") or ""),
+            feature_source=str(payload.get("feature_source") or ""),
+            accuracy=payload.get("accuracy") if isinstance(payload.get("accuracy"), (int, float)) else None,
+            metric_name=str(payload.get("metric_name") or ""),
+            n_samples=payload.get("n_samples") if isinstance(payload.get("n_samples"), int) else None,
             raw=payload,
         )
 
@@ -85,6 +105,8 @@ class ModelRegistryService:
         )
         # region_id -> (fetched_at_monotonic, [ModelInfo])
         self._cache: dict[str, tuple[float, list[ModelInfo]]] = {}
+        # region_id -> (fetched_at_monotonic, capabilities dict)
+        self._cap_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
     def _now(self) -> float:
         import time
@@ -104,6 +126,29 @@ class ModelRegistryService:
         models = [ModelInfo.from_payload(m) for m in raw if isinstance(m, dict)]
         self._cache[key] = (self._now(), models)
         return models
+
+    def capabilities(self, region_id: str, *, use_cache: bool = True) -> dict[str, Any]:
+        """GET /models/capabilities?region_id= — training methods + task contracts.
+
+        Returns {} on failure so callers can fall back to built-in defaults. The
+        payload shape (verified live): {schema_version, default_training_method,
+        regions, methods:[{id,name,available,feature_source,supported_model_types,
+        selection_rule,...}], task_contracts:{<task>:{temporal_mode,required_fields,
+        description,available?}}}.
+        """
+        from urllib.parse import urlencode
+
+        key = region_id or "_"
+        if use_cache:
+            hit = self._cap_cache.get(key)
+            if hit and (self._now() - hit[0]) < self.cache_ttl:
+                return hit[1]
+        payload = self.http.get_json_optional(
+            f"/models/capabilities?{urlencode({'region_id': region_id})}"
+        )
+        caps = payload if isinstance(payload, dict) else {}
+        self._cap_cache[key] = (self._now(), caps)
+        return caps
 
     def custom_models(self, region_id: str) -> list[ModelInfo]:
         return [m for m in self.list_models(region_id) if m.source == "custom"]
@@ -143,5 +188,7 @@ class ModelRegistryService:
     def invalidate(self, region_id: str = "") -> None:
         if region_id:
             self._cache.pop(region_id or "_", None)
+            self._cap_cache.pop(region_id or "_", None)
         else:
             self._cache.clear()
+            self._cap_cache.clear()

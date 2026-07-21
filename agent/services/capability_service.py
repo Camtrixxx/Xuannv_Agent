@@ -7,7 +7,12 @@ the external annotation UI:
     native           → a system task / land-cover class covers it; proceed
     custom_ready     → a trained custom model exists; proceed with model_id
     custom_training  → a custom model is training; ask the user to wait
+    custom_failed    → last training failed; say so and offer a retry
     needs_annotation → nothing exists; hand off to annotate + train
+
+The handoff instruction is enriched from ``GET /models/capabilities`` (the
+region's default training method + the task's temporal contract) when reachable,
+falling back to built-in defaults otherwise.
 
 The agent NEVER annotates or trains here — it only resolves state (read-only
 ``GET /models``) and builds the handoff instruction. See
@@ -119,11 +124,22 @@ class CapabilityService:
 
         The agent returns this in AgentResponse.action; the frontend decides how
         to open it (new tab). Mockable — in debug the UI just opens the URL.
+
+        Enriched from GET /models/capabilities when reachable: the region's real
+        default training method and the task's temporal contract are attached so
+        the annotation page opens pre-aligned. We do NOT expose a method picker —
+        the backend default (xuannv_earth) is used; the field is informational.
         """
+        caps = self.registry.capabilities(cap.region_id)
+        default_method = str(caps.get("default_training_method") or "xuannv_earth")
+        contract_key = "change_detection" if model_type == "change_detection" else "land_use_classification"
+        task_contract = (caps.get("task_contracts") or {}).get(contract_key) or {}
+
         params = {
             "region_id": cap.region_id,
             "class": cap.class_name,
             "model_type": model_type,
+            "training_method": default_method,
         }
         if month:
             params["month"] = month
@@ -132,6 +148,8 @@ class CapabilityService:
             "url": f"{self.annotation_ui_base}/models/new?{urlencode(params)}",
             "class_name": cap.class_name,
             "model_type": model_type,
+            "training_method": default_method,
+            "task_contract": task_contract,
             "params": params,
         }
 

@@ -115,3 +115,53 @@ def test_live_list_models_haidian():
     models = svc.list_models("haidian")
     assert models, "live /models returned nothing"
     assert any(m.source == "custom" for m in models)
+
+
+# --- P2: enriched ModelInfo fields -----------------------------------------
+CUSTOM_AEF = {
+    "id": "model_aef1", "name": "湿地AEF", "type": "change_detection",
+    "task_type": "change_detection", "status": "completed", "source": "custom",
+    "classes": [{"id": "c0", "name": "湿地"}],
+    "requested_training_method": "aef", "resolved_training_method": "pixel_mlp",
+    "feature_source": "aef", "accuracy": 0.912, "metric_name": "training_f1", "n_samples": 14,
+}
+
+
+def test_modelinfo_parses_training_metadata():
+    m = ModelInfo.from_payload(CUSTOM_AEF)
+    assert m.feature_source == "aef" and m.uses_annual_feature
+    assert m.resolved_training_method == "pixel_mlp"
+    assert m.accuracy == 0.912 and m.metric_name == "training_f1" and m.n_samples == 14
+
+
+def test_modelinfo_annual_feature_false_for_xuannv():
+    assert not ModelInfo.from_payload(CUSTOM_WETLAND).uses_annual_feature
+
+
+# --- P1: capabilities fetch + cache ----------------------------------------
+CAPS_PAYLOAD = {
+    "schema_version": 1, "default_training_method": "xuannv_earth",
+    "regions": ["haidian"],
+    "methods": [{"id": "xuannv_earth", "available": True}],
+    "task_contracts": {"change_detection": {"temporal_mode": "pair",
+                       "required_fields": ["before_month", "after_month"]}},
+}
+
+
+def test_capabilities_fetch_and_cache(monkeypatch):
+    svc = ModelRegistryService(cache_ttl=60.0)
+    calls = {"n": 0}
+    def fake(path):
+        calls["n"] += 1
+        return dict(CAPS_PAYLOAD)
+    monkeypatch.setattr(svc.http, "get_json_optional", fake)
+    caps = svc.capabilities("haidian")
+    assert caps["default_training_method"] == "xuannv_earth"
+    svc.capabilities("haidian")  # cached
+    assert calls["n"] == 1
+
+
+def test_capabilities_empty_on_failure(monkeypatch):
+    svc = ModelRegistryService()
+    monkeypatch.setattr(svc.http, "get_json_optional", lambda path: None)
+    assert svc.capabilities("haidian") == {}

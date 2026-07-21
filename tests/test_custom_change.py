@@ -97,6 +97,41 @@ def test_custom_change_needs_two_dates(monkeypatch):
         svc.analyze(req)
 
 
+def test_aef_same_year_change_warns(monkeypatch):
+    # AEF model + two months in the SAME year → annual-feature warning fires.
+    from agent.services.model_registry_service import ModelInfo
+    svc, _ = _svc(monkeypatch, {"202504": _custom_img(32), "202510": _custom_img(96)})
+    aef_model = ModelInfo.from_payload({
+        "id": "model_x", "name": "湿地AEF", "type": "change_detection",
+        "status": "completed", "source": "custom", "feature_source": "aef",
+        "resolved_training_method": "pixel_mlp", "n_samples": 12,
+        "classes": [{"id": "c0", "name": "湿地"}],
+    })
+    monkeypatch.setattr(svc.registry, "model_status", lambda mid, rid="": aef_model)
+    req = _req()
+    req.before_time_range, req.after_time_range = "2025-04", "2025-10"
+    result = svc.analyze(req)
+    assert any("AEF 年度特征" in l and "无意义" in l for l in result.limitations)
+    # method note reflects the real feature source + samples.
+    assert any("AEF" in n and "12" in n for n in result.method_notes)
+
+
+def test_aef_cross_year_change_no_warning(monkeypatch):
+    # Same AEF model but cross-year months → no annual-feature warning.
+    from agent.services.model_registry_service import ModelInfo
+    svc, _ = _svc(monkeypatch, {"202412": _custom_img(32), "202506": _custom_img(96)})
+    aef_model = ModelInfo.from_payload({
+        "id": "model_x", "name": "湿地AEF", "type": "change_detection",
+        "status": "completed", "source": "custom", "feature_source": "aef",
+        "classes": [{"id": "c0", "name": "湿地"}],
+    })
+    monkeypatch.setattr(svc.registry, "model_status", lambda mid, rid="": aef_model)
+    req = _req()
+    req.before_time_range, req.after_time_range = "2024-12", "2025-06"
+    result = svc.analyze(req)
+    assert not any("AEF 年度特征" in l for l in result.limitations)
+
+
 @pytest.mark.skipif(not LIVE, reason="set AGENT_LIVE_TESTS=1 to hit the live API")
 def test_live_custom_infer_roundtrip():
     from agent.services.aoi_cover_service import AoiCoverService
