@@ -2,21 +2,21 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urljoin
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.parse import urlencode
 
 from PIL import Image
 
 from agent.config import EmbeddingAPIConfig, ReportConfig
 from agent.schemas.report import AnalysisResult, ChartAsset, MetricCard, ReportRequest
 from agent.services.common import bbox_intersection_score
-from agent.services.patch_selection_service import TASK_TO_HAIDIAN
+from agent.services.http_client import JsonHttpClient
 from agent.services.satellite_basemap import basemap_chart
+from agent.taxonomy import TASK_TO_HAIDIAN
+from agent.tools.classmap import class_distribution, normalize_legend
+from agent.tools.raster import binary_coverage
 
 
 TASK_DISPLAY = {
@@ -64,7 +64,22 @@ class HaidianEmbeddingAnalysisService:
         self.report_config = report_config or ReportConfig()
         self.asset_dir = self.report_config.asset_dir
         self.asset_dir.mkdir(parents=True, exist_ok=True)
-        self.opener = build_opener(ProxyHandler({}))
+        self.http = JsonHttpClient(
+            base_url=self.config.base_url,
+            timeout=self.config.timeout,
+            error_prefix="海淀 embedding-api 调用失败",
+        )
+        # Cache class legends per task (id/name/color rarely change within a run).
+        self._legend_cache: dict[str, list[dict[str, Any]]] = {}
+
+    def _legend(self, task_id: str) -> list[dict[str, Any]]:
+        if task_id not in self._legend_cache:
+            from urllib.parse import urlencode
+
+            query = urlencode({"region_id": "haidian"})
+            raw = self.http.get_list_optional(f"/system-models/{task_id}/classes?{query}")
+            self._legend_cache[task_id] = normalize_legend(raw)
+        return self._legend_cache[task_id]
 
     def analyze(self, request: ReportRequest) -> AnalysisResult:
         task_id = self._normalize_task(request.task)
@@ -89,7 +104,7 @@ class HaidianEmbeddingAnalysisService:
             "embedding",
         )
         task_summary = self._get_json_optional(f"/regions/haidian/tasks/{task_id}/summary?version=v1")
-        image_stats = self._image_stats(result_asset, task_id)
+        image_stats = self._image_stats(result_asset, task_id, patch)
         task_display = TASK_DISPLAY.get(task_id, request.task)
         basemap = basemap_chart(patch.get("bounds_wgs84"), self.asset_dir, f"haidian-{patch_id}")
 
@@ -133,6 +148,8 @@ class HaidianEmbeddingAnalysisService:
                 "专题结果图和 embedding 预览图均来自在线海淀 embedding-api。",
                 "报告中的图像统计为 Agent 从 PNG 结果图中提取的轻量指标，正式业务评估仍需接入标签或评估接口。",
             ],
+            data_table=image_stats.get("class_distribution") or [],
+            data_table_title=(f"{task_display}·各类别覆盖占比" if image_stats.get("class_distribution") else ""),
             data_source="haidian_embedding_api",
             generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             aef_payload={
@@ -157,6 +174,8 @@ class HaidianEmbeddingAnalysisService:
                     kind="image",
                     url=self._asset_url(result_asset),
                     caption=f"海淀在线专题服务返回的 {task_display} patch 级结果图。",
+                    bounds_wgs84=[float(v) for v in (patch.get("bounds_wgs84") or [])][:4],
+                    overlay=len(patch.get("bounds_wgs84") or []) == 4,
                 ),
                 ChartAsset(
                     title="Embedding 可视化预览",
@@ -274,39 +293,21 @@ class HaidianEmbeddingAnalysisService:
         return f"/regions/haidian/patches/{patch_id}/tasks/{task_id}/result?{query}"
 
     def _get_json(self, path: str) -> Any:
-        url = urljoin(self.config.base_url.rstrip("/") + "/", path.lstrip("/"))
-        request = Request(url, headers={"Accept": "application/json"}, method="GET")
-        try:
-            with self.opener.open(request, timeout=self.config.timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except (OSError, URLError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"海淀 embedding-api 调用失败：{url}，原因：{exc}") from exc
+        return self.http.get_json(path)
 
     def _get_json_optional(self, path: str) -> dict[str, Any]:
-        try:
-            payload = self._get_json(path)
-        except RuntimeError:
-            return {}
-        return payload if isinstance(payload, dict) else {}
+        return self.http.get_json_optional(path)
 
     def _download_remote_asset(self, remote_url: str, request: ReportRequest, task_id: str, kind: str) -> Path:
-        source_url = urljoin(self.config.base_url.rstrip("/") + "/", remote_url.lstrip("/"))
+        source_url = self.http._url(remote_url)
         digest = hashlib.sha1(f"{source_url}-{request.time_range}-{task_id}-{kind}".encode("utf-8")).hexdigest()[:12]
         out_path = self.asset_dir / f"haidian_{task_id}_{kind}_{digest}.png"
-        if not out_path.exists():
-            try:
-                with self.opener.open(source_url, timeout=self.config.timeout) as response, out_path.open("wb") as fh:
-                    shutil.copyfileobj(response, fh)
-            except HTTPError as exc:
-                raise RuntimeError(f"海淀专题图像下载失败：{source_url}，HTTP {exc.code}") from exc
-            except OSError as exc:
-                raise RuntimeError(f"海淀专题图像下载失败：{source_url}，原因：{exc}") from exc
-        return out_path
+        return self.http.download(remote_url, out_path, asset_label="海淀专题图像")
 
     def _asset_url(self, path: Path) -> str:
         return f"/reports/assets/{path.name}"
 
-    def _image_stats(self, image_path: Path, task_id: str) -> dict[str, Any]:
+    def _image_stats(self, image_path: Path, task_id: str, patch: dict[str, Any]) -> dict[str, Any]:
         try:
             with Image.open(image_path) as image:
                 rgb = image.convert("RGB")
@@ -325,9 +326,19 @@ class HaidianEmbeddingAnalysisService:
             dominant_count, dominant_rgb = colors[0]
             stats["dominant_color"] = f"rgb{dominant_rgb}"
             stats["dominant_ratio"] = round(dominant_count / max(total, 1), 4)
-            if task_id in BINARY_TASKS:
-                foreground = total - dominant_count
-                stats["foreground_ratio"] = round(foreground / max(total, 1), 4)
+            # Binary tasks: fixed background per task + exact UTM area (P3.1 tools),
+            # replacing the old "dominant colour = background" heuristic that flipped
+            # once the target covered >50% of the patch.
+            coverage = binary_coverage(task_id, colors, patch.get("bounds"))
+            if coverage:
+                stats.update({k: v for k, v in coverage.items() if v is not None})
+            else:
+                # Multiclass task: map colours to the authoritative API legend and
+                # produce per-class shares (+ area). We report the model's output
+                # faithfully under correct labels; model accuracy is upstream.
+                distribution = class_distribution(colors, self._legend(task_id), patch.get("bounds"))
+                if distribution:
+                    stats["class_distribution"] = distribution
         return stats
 
     def _build_metrics(
@@ -370,7 +381,21 @@ class HaidianEmbeddingAnalysisService:
                 MetricCard(
                     "目标占比",
                     f"{float(image_stats['foreground_ratio']) * 100:.2f}%",
-                    "二值专题图中非主背景颜色的像素占比",
+                    "二值专题图中目标（非背景）像素占该 patch 的比例",
+                )
+            )
+        if image_stats.get("covered_area_ha") is not None:
+            total_ha = image_stats.get("total_area_ha")
+            desc = (
+                f"按 patch 覆盖面积 {float(total_ha):.2f} 公顷估算"
+                if total_ha is not None
+                else "按 patch 覆盖面积估算"
+            )
+            cards.append(
+                MetricCard(
+                    "目标面积",
+                    f"{float(image_stats['covered_area_ha']):.2f} 公顷",
+                    desc,
                 )
             )
         if task_summary:
@@ -384,7 +409,15 @@ class HaidianEmbeddingAnalysisService:
         task_display = TASK_DISPLAY.get(task_id, request.task)
         stat_text = ""
         if image_stats.get("foreground_ratio") is not None:
-            stat_text = f"结果图中目标像素占比约 {float(image_stats['foreground_ratio']) * 100:.2f}%。"
+            ratio_pct = float(image_stats["foreground_ratio"]) * 100
+            covered_ha = image_stats.get("covered_area_ha")
+            if covered_ha is not None:
+                stat_text = (
+                    f"结果图中目标覆盖约 {ratio_pct:.2f}%，"
+                    f"对应该 patch 约 {float(covered_ha):.2f} 公顷。"
+                )
+            else:
+                stat_text = f"结果图中目标像素占比约 {ratio_pct:.2f}%。"
         elif image_stats.get("unique_colors") is not None:
             stat_text = f"结果图包含 {image_stats['unique_colors']} 类颜色表达。"
         description = TASK_DESCRIPTIONS.get(task_id, "").rstrip("。")

@@ -1,60 +1,15 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Any
-from urllib.error import URLError
-from urllib.parse import urlencode, urljoin
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.parse import urlencode
 
 from agent.config import EmbeddingAPIConfig
 from agent.services.common import bbox_intersection_score
-from agent.services.harbin_embedding_service import STATIC_TASKS, TASK_TO_HARBIN, aef_available
+from agent.services.harbin_embedding_service import aef_available
+from agent.services.http_client import JsonHttpClient
 from agent.services.yajiang_patch_index_service import YajiangPatchIndexService
-
-
-TASK_TO_HAIDIAN = {
-    "建筑物提取": "building_extraction",
-    "建筑提取": "building_extraction",
-    "道路提取": "road_extraction",
-    "道路识别": "road_extraction",
-    "施工识别": "construction",
-    "施工检测": "construction",
-    "施工地检测": "construction",
-    "土地利用分类": "land_use_classification",
-    "土地利用": "land_use_classification",
-    "土地覆盖分类": "land_cover_classification",
-    "土地覆盖": "land_cover_classification",
-    "水体提取": "water_extraction",
-    "水体分布": "water_extraction",
-    "水体分类": "water_extraction",
-}
-
-TASK_TO_YAJIANG = {
-    "地物分类": "landcover",
-    "土地覆盖": "landcover",
-    "土地覆盖分类": "landcover",
-    "水体分布": "water",
-    "水体分类": "water",
-    "水体提取": "water",
-    "高程地形": "dem",
-    "高程重建": "dem",
-    "地形分析": "dem",
-}
-
-
-REGION_IDS = {
-    "雅江区域": "yajiang",
-    "雅江": "yajiang",
-    "yajiang": "yajiang",
-    "哈尔滨新区": "harbin",
-    "harbin": "harbin",
-    "harbin_new_area": "harbin",
-    "北京市海淀区": "haidian",
-    "海淀区": "haidian",
-    "海淀": "haidian",
-    "haidian": "haidian",
-}
+from agent.taxonomy import REGION_IDS, STATIC_TASKS, normalize_task
 
 
 @dataclass(slots=True)
@@ -80,7 +35,11 @@ class PatchSelectionService:
     ) -> None:
         self.config = config or EmbeddingAPIConfig()
         self.yajiang_index = yajiang_index or YajiangPatchIndexService()
-        self.opener = build_opener(ProxyHandler({}))
+        self.http = JsonHttpClient(
+            base_url=self.config.base_url,
+            timeout=self.config.timeout,
+            error_prefix="Patch 检索失败",
+        )
 
     def search(self, payload: dict[str, Any]) -> PatchSearchResult:
         region = str(payload.get("region") or "哈尔滨新区")
@@ -185,11 +144,7 @@ class PatchSelectionService:
         return True
 
     def _normalize_task(self, region_id: str, task: str) -> str:
-        if region_id == "yajiang":
-            return TASK_TO_YAJIANG.get(task, task)
-        if region_id == "haidian":
-            return TASK_TO_HAIDIAN.get(task, task)
-        return TASK_TO_HARBIN.get(task, task)
+        return normalize_task(region_id, task)
 
     def _task_available(self, region_id: str, patch: dict[str, Any], task_id: str) -> bool:
         if not task_id:
@@ -220,13 +175,7 @@ class PatchSelectionService:
         return sorted(values)
 
     def _get_json(self, path: str) -> Any:
-        url = urljoin(self.config.base_url.rstrip("/") + "/", path.lstrip("/"))
-        request = Request(url, headers={"Accept": "application/json"}, method="GET")
-        try:
-            with self.opener.open(request, timeout=self.config.timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except (OSError, URLError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"Patch 检索失败：{url}，原因：{exc}") from exc
+        return self.http.get_json(path)
 
     def _parse_bbox(self, raw: Any) -> list[float]:
         if not isinstance(raw, list) or len(raw) != 4:

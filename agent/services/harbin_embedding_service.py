@@ -2,40 +2,29 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
-from urllib.error import URLError
-from urllib.parse import urlencode, urljoin
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.parse import urlencode
 
 from agent.config import EmbeddingAPIConfig, ReportConfig
 from agent.schemas.report import AnalysisResult, ChartAsset, MetricCard, ReportRequest
 from agent.services.common import bbox_intersection_score
-from agent.services.region_availability import HARBIN_MONTHS
+from agent.services.http_client import JsonHttpClient
 from agent.services.satellite_basemap import basemap_chart
+from agent.taxonomy import (
+    HARBIN_MONTHS,
+    STATIC_TASKS,
+    SYSTEM_MODEL_TASKS,
+    TASK_TO_HARBIN,
+)
 
-
-TASK_TO_HARBIN = {
-    "水体分布": "water_extraction",
-    "水体分类": "water_extraction",
-    "水体提取": "water_extraction",
-    "建筑物提取": "building_extraction",
-    "建筑提取": "building_extraction",
-    "土地利用分类": "land_use_classification",
-    "土地利用": "land_use_classification",
-    "用地分类": "land_use_classification",
-}
-
+# Harbin-only display mapping (backend id -> zh label); not part of the shared
+# vocabulary, so it stays local to this service.
 TASK_DISPLAY = {
     "water_extraction": "水体提取",
     "building_extraction": "建筑物提取",
     "land_use_classification": "土地利用分类",
 }
-
-STATIC_TASKS = {"building_extraction", "land_use_classification"}
-SYSTEM_MODEL_TASKS = {"building_extraction", "water_extraction"}
 
 
 def _stable_pick(items: list[dict[str, Any]], key: str, count: int) -> list[dict[str, Any]]:
@@ -62,7 +51,11 @@ class HarbinEmbeddingAnalysisService:
         self.report_config = report_config or ReportConfig()
         self.asset_dir = self.report_config.asset_dir
         self.asset_dir.mkdir(parents=True, exist_ok=True)
-        self.opener = build_opener(ProxyHandler({}))
+        self.http = JsonHttpClient(
+            base_url=self.config.base_url,
+            timeout=self.config.timeout,
+            error_prefix="哈尔滨 embedding-api 调用失败",
+        )
 
     def analyze(self, request: ReportRequest) -> AnalysisResult:
         task_id = self._normalize_task(request.task)
@@ -273,24 +266,13 @@ class HarbinEmbeddingAnalysisService:
         return self._request_json(path, method="POST")
 
     def _request_json(self, path: str, method: str) -> Any:
-        url = urljoin(self.config.base_url.rstrip("/") + "/", path.lstrip("/"))
-        request = Request(url, headers={"Accept": "application/json"}, method=method)
-        try:
-            with self.opener.open(request, timeout=self.config.timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except (OSError, URLError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"哈尔滨 embedding-api 调用失败：{url}，原因：{exc}") from exc
+        return self.http.request_json(path, method=method)
 
     def _copy_remote_asset(self, remote_url: str, request: ReportRequest, task_id: str, kind: str) -> str:
-        source_url = urljoin(self.config.base_url.rstrip("/") + "/", remote_url.lstrip("/"))
+        source_url = self.http._url(remote_url)
         digest = hashlib.sha1(f"{source_url}-{request.time_range}-{task_id}-{kind}".encode("utf-8")).hexdigest()[:12]
         out_path = self.asset_dir / f"harbin_{task_id}_{kind}_{digest}.png"
-        if not out_path.exists():
-            try:
-                with self.opener.open(source_url, timeout=self.config.timeout) as response, out_path.open("wb") as fh:
-                    shutil.copyfileobj(response, fh)
-            except OSError as exc:
-                raise RuntimeError(f"哈尔滨 embedding-api 图像下载失败：{source_url}，原因：{exc}") from exc
+        self.http.download(remote_url, out_path, asset_label="哈尔滨 embedding-api 图像")
         return f"/reports/assets/{out_path.name}"
 
     def _build_charts(
