@@ -181,6 +181,74 @@ REGION_TASKS: dict[str, list[str]] = {
 }
 
 
+# --- Native vs. custom analysis objects ----------------------------------
+# Land-cover (multiclass) legend for Haidian, from the live
+# /system-models/land_cover_classification/classes endpoint.
+LAND_COVER_CLASSES = [
+    "树木覆盖", "灌木地", "草地", "耕地", "建成区", "裸地/稀疏植被", "永久性水体",
+]
+
+# Analysis objects the service can produce WITHOUT any custom annotation, i.e.
+# they map to a system task or a land-cover class. Free-text alias -> the
+# canonical native concept (used only to answer "is this native?"). Anything
+# NOT covered here needs a custom model (see NON_NATIVE_ALIASES).
+NATIVE_OBJECTS = {
+    # binary system tasks
+    "建筑物": "建筑物提取", "建筑": "建筑物提取", "楼房": "建筑物提取",
+    "道路": "道路提取", "主干道": "道路提取", "马路": "道路提取",
+    "施工": "施工识别", "工地": "施工识别", "建筑工地": "施工识别", "施工地": "施工识别",
+    "水体": "水体提取", "水域": "水体提取", "水": "水体提取",
+    # land-cover classes (multiclass model)
+    "林地": "土地覆盖分类", "树木": "土地覆盖分类", "森林": "土地覆盖分类", "灌木": "土地覆盖分类",
+    "草地": "土地覆盖分类", "草坪": "土地覆盖分类",
+    "耕地": "土地覆盖分类", "农田": "土地覆盖分类", "农地": "土地覆盖分类",
+    "裸地": "土地覆盖分类", "裸土": "土地覆盖分类",
+    "建成区": "土地覆盖分类",
+}
+
+# Non-native analysis objects that require a CUSTOM model (annotate → train, or
+# few-shot similarity recall for small sample counts). Free-text alias ->
+# canonical class name used for training/matching. When a user asks for one of
+# these and no ready custom model exists, the agent hands off to annotation.
+NON_NATIVE_ALIASES = {
+    "湿地": "湿地", "沼泽": "湿地",
+    "河流": "河流", "河": "河流", "江": "河流",
+    "湖泊": "湖泊", "湖": "湖泊",
+    "池塘": "池塘", "水塘": "池塘",
+    "十字路口": "道路十字路口", "路口": "道路十字路口", "交叉口": "道路十字路口",
+    "操场": "操场",
+    "机场": "机场", "飞机场": "机场",
+    "体育场": "体育场", "运动场": "体育场", "球场": "体育场",
+    "垃圾场": "大型垃圾场", "垃圾填埋场": "大型垃圾场", "填埋场": "大型垃圾场",
+    "火车站": "火车站", "高铁站": "火车站", "车站": "火车站",
+    "停车场": "露天停车场", "露天停车场": "露天停车场", "停车区": "露天停车场",
+}
+
+# Custom model statuses that mean "usable now" (system=ready, custom=completed).
+READY_MODEL_STATUSES = {"ready", "completed"}
+# Statuses that mean "still training, come back later".
+TRAINING_MODEL_STATUSES = {"training", "running", "pending", "queued"}
+
+
+def native_object(text: str) -> str:
+    """Return the native concept a phrase maps to, or "" if not native."""
+    t = str(text or "")
+    for alias, concept in NATIVE_OBJECTS.items():
+        if alias in t:
+            return concept
+    return ""
+
+
+def non_native_object(text: str) -> str:
+    """Return the canonical custom class a phrase names, or "" if none."""
+    t = str(text or "")
+    # Prefer the longest alias match so "露天停车场" beats "停车场".
+    for alias in sorted(NON_NATIVE_ALIASES, key=len, reverse=True):
+        if alias in t:
+            return NON_NATIVE_ALIASES[alias]
+    return ""
+
+
 # --- Accessors -----------------------------------------------------------
 
 def resolve_region_id(region: str) -> str:
