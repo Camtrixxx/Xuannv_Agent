@@ -632,6 +632,8 @@ class ReportAgent:
                 aoi=request.aoi,
                 before_time_range=request.before_time_range,
                 after_time_range=request.after_time_range,
+                custom_model_id=intent.custom_model_id,
+                target_object=intent.target_object,
             )
             state["request"] = change_request
             try:

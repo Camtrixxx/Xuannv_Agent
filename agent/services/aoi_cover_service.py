@@ -138,23 +138,45 @@ class AoiCoverService:
         except (RuntimeError, OSError):
             return None
 
-    def fetch_result_array(self, region_id: str, patch_id: str, task_id: str, month: str):
+    def fetch_result_array(
+        self, region_id: str, patch_id: str, task_id: str, month: str, model_id: str = ""
+    ):
         """Fetch a result PNG as an HxWx3 uint8 numpy array (or None on failure).
 
         Shared by change detection, which needs pixel positions (not just a
-        colour histogram) to diff two dates.
+        colour histogram) to diff two dates. When ``model_id`` is given, the
+        result comes from a *custom* model via ``POST /models/{id}/infer``
+        (target painted in the class colour on a grey background); otherwise it
+        comes from the system task result endpoint.
         """
         import numpy as np
-        from urllib.parse import urlencode
 
-        query = urlencode({"format": "png", "version": "v1", "month": month})
-        url = f"/regions/{region_id}/patches/{patch_id}/tasks/{task_id}/result?{query}"
+        if model_id:
+            url = self._custom_infer_url(region_id, patch_id, month, model_id)
+            if not url:
+                return None
+        else:
+            from urllib.parse import urlencode
+
+            query = urlencode({"format": "png", "version": "v1", "month": month})
+            url = f"/regions/{region_id}/patches/{patch_id}/tasks/{task_id}/result?{query}"
         try:
             data = self.http.fetch_bytes(url, asset_label="AOI 变化检测结果")
             with Image.open(io.BytesIO(data)) as image:
                 return np.asarray(image.convert("RGB"))
         except (RuntimeError, OSError):
             return None
+
+    def _custom_infer_url(self, region_id: str, patch_id: str, month: str, model_id: str) -> str:
+        """Run a custom model on one patch and return its result_url ("" on fail)."""
+        body = {"region_id": region_id, "patch_id": patch_id, "month": month}
+        try:
+            payload = self.http.post_json(f"/models/{model_id}/infer", body=body)
+        except RuntimeError:
+            return ""
+        if isinstance(payload, dict):
+            return str(payload.get("result_url") or "")
+        return ""
 
     def _describe(self, task_id: str, summary: dict[str, Any]) -> str:
         from agent.services.haidian_embedding_service import TASK_DISPLAY

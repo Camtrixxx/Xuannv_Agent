@@ -37,6 +37,19 @@ def mask_for_task(rgb_array: np.ndarray, task_id: str) -> np.ndarray | None:
     return foreground_mask(rgb_array, background)
 
 
+# Custom-model result PNGs paint the target class in its class colour on a fixed
+# light-grey background (verified against live /models infer output).
+CUSTOM_MODEL_BACKGROUND = (200, 200, 200)
+
+
+def custom_model_mask(rgb_array: np.ndarray) -> np.ndarray:
+    """Foreground (target) mask for a custom-model result PNG.
+
+    Target pixels are the class colour; non-target is grey ``(200,200,200)``.
+    """
+    return foreground_mask(rgb_array, CUSTOM_MODEL_BACKGROUND)
+
+
 def binary_change(
     mask_before: np.ndarray,
     mask_after: np.ndarray,

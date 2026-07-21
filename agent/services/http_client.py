@@ -42,9 +42,14 @@ class JsonHttpClient:
     def _url(self, path: str) -> str:
         return urljoin(self.base_url, path.lstrip("/"))
 
-    def request_json(self, path: str, method: str = "GET") -> Any:
+    def request_json(self, path: str, method: str = "GET", body: Any = None) -> Any:
         url = self._url(path)
-        request = Request(url, headers={"Accept": "application/json"}, method=method)
+        headers = {"Accept": "application/json"}
+        data: bytes | None = None
+        if body is not None:
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        request = Request(url, data=data, headers=headers, method=method)
         last_exc: Exception | None = None
         for attempt in range(self.max_attempts):
             try:
@@ -59,8 +64,8 @@ class JsonHttpClient:
     def get_json(self, path: str) -> Any:
         return self.request_json(path, method="GET")
 
-    def post_json(self, path: str) -> Any:
-        return self.request_json(path, method="POST")
+    def post_json(self, path: str, body: Any = None) -> Any:
+        return self.request_json(path, method="POST", body=body)
 
     def get_json_optional(self, path: str) -> dict[str, Any]:
         try:

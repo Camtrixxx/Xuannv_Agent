@@ -47,7 +47,7 @@ def _svc_with(monkeypatch, patches, arrays_by_month):
     svc = ChangeMonitorService()
     monkeypatch.setattr(svc.patch_selection, "search", lambda payload: _FakeSearch(patches))
 
-    def fake_fetch(region_id, patch_id, task_id, month):
+    def fake_fetch(region_id, patch_id, task_id, month, model_id=""):
         return arrays_by_month.get(month)
 
     monkeypatch.setattr(svc.aoi_cover, "fetch_result_array", fake_fetch)

@@ -18,7 +18,7 @@ from agent.services.aoi_cover_service import AoiCoverService
 from agent.services.haidian_embedding_service import TASK_DISPLAY, TASK_TO_HAIDIAN
 from agent.services.patch_selection_service import PatchSelectionService
 from agent.services.satellite_basemap import basemap_chart
-from agent.tools.change import aggregate_change, binary_change, mask_for_task
+from agent.tools.change import aggregate_change, binary_change, custom_model_mask, mask_for_task
 
 # Tasks meaningful to monitor over a short window (built environment dynamics).
 CHANGE_TASKS = {"construction", "building_extraction", "road_extraction", "water_extraction"}
@@ -44,7 +44,12 @@ class ChangeMonitorService:
 
     def analyze(self, request: ReportRequest) -> AnalysisResult:
         region_id = "haidian"
-        task_id = self._resolve_task(request.task)
+        # Custom-model change monitoring (non-native object, e.g. 湿地): the
+        # object's ready model diffs its own two-date foreground masks. Native
+        # tasks keep the system-task path.
+        model_id = getattr(request, "custom_model_id", "") or ""
+        custom_class = getattr(request, "target_object", "") or ""
+        task_id = self._resolve_task(request.task) if not model_id else "custom"
         before, after = self._resolve_months(request)
         bbox = self._bbox(request.aoi)
         if bbox is None:
@@ -56,11 +61,11 @@ class ChangeMonitorService:
         if not patches:
             raise RuntimeError("当前框选范围内没有可用于监测的 patch，请调整范围或月份。")
 
-        per_patch, rows = self._diff_patches(region_id, task_id, before, after, patches)
+        per_patch, rows = self._diff_patches(region_id, task_id, before, after, patches, model_id)
         agg = aggregate_change(per_patch)
         if agg["patch_count"] == 0:
             raise RuntimeError("两期结果均无法获取，无法计算变化。请更换月份或范围。")
-        return self._build_result(request, task_id, before, after, agg, rows)
+        return self._build_result(request, task_id, before, after, agg, rows, model_id, custom_class)
 
     def _resolve_task(self, task: str) -> str:
         task_id = TASK_TO_HAIDIAN.get(task, "")
@@ -95,7 +100,7 @@ class ChangeMonitorService:
             return None
         return bbox
 
-    def _diff_patches(self, region_id, task_id, before, after, patches):
+    def _diff_patches(self, region_id, task_id, before, after, patches, model_id=""):
         """Return (per_patch_change_dicts, table_rows). Skips patches missing a date."""
         per_patch: list[dict[str, Any]] = []
         rows: list[dict[str, Any]] = []
@@ -103,12 +108,16 @@ class ChangeMonitorService:
             patch_id = str(patch.get("patch_id") or "")
             if not patch_id:
                 continue
-            arr_a = self.aoi_cover.fetch_result_array(region_id, patch_id, task_id, before)
-            arr_b = self.aoi_cover.fetch_result_array(region_id, patch_id, task_id, after)
+            arr_a = self.aoi_cover.fetch_result_array(region_id, patch_id, task_id, before, model_id)
+            arr_b = self.aoi_cover.fetch_result_array(region_id, patch_id, task_id, after, model_id)
             if arr_a is None or arr_b is None:
                 continue
-            mask_a = mask_for_task(arr_a, task_id)
-            mask_b = mask_for_task(arr_b, task_id)
+            if model_id:
+                mask_a = custom_model_mask(arr_a)
+                mask_b = custom_model_mask(arr_b)
+            else:
+                mask_a = mask_for_task(arr_a, task_id)
+                mask_b = mask_for_task(arr_b, task_id)
             if mask_a is None or mask_b is None or mask_a.shape != mask_b.shape:
                 continue
             from agent.tools.raster import area_ha_from_bounds
@@ -129,9 +138,11 @@ class ChangeMonitorService:
         rows.sort(key=lambda r: (r["net_ha"] if r["net_ha"] is not None else 0), reverse=True)
         return per_patch, rows
 
-    def _build_result(self, request, task_id, before, after, agg, rows) -> AnalysisResult:
+    def _build_result(self, request, task_id, before, after, agg, rows, model_id="", custom_class="") -> AnalysisResult:
         region = "北京市海淀区"
-        name = TASK_DISPLAY.get(task_id, task_id)
+        # Custom-model runs show the user's own class name; native runs use the
+        # built-in task display name.
+        name = (custom_class or "自定义地物") if model_id else TASK_DISPLAY.get(task_id, task_id)
         b_disp, a_disp = self._fmt_month(before), self._fmt_month(after)
         span = f"{b_disp} → {a_disp}"
         net = agg["net_area_ha"]
@@ -178,15 +189,8 @@ class ChangeMonitorService:
                 },
             ],
             risks=self._risks(agg),
-            method_notes=[
-                f"Agent 将请求识别为『建设扰动监测』场景，region=haidian、task={task_id}、{before}→{after}。",
-                f"调用海淀 embedding-api：{self.config.base_url}，逐 patch 拉取两期结果做像素级 diff。",
-                "变化＝两期二值前景掩膜的逐像素差；面积按整块 patch 的 UTM 面积换算。",
-            ],
-            limitations=[
-                "变化来自两期模型输出之差，模型逐期误差会叠加为伪变化，显著斑块建议实地核验。",
-                "面积按整块 patch 聚合，AOI 边界未做像素级裁剪，边缘片区略有高估。",
-            ],
+            method_notes=self._method_notes(task_id, before, after, model_id, name),
+            limitations=self._limitations(model_id),
             confidence_notes=[
                 "两期专题结果均来自在线海淀 embedding-api，PNG 逐像素对齐（128×128）。",
                 "变化统计为 Agent 从结果图计算的轻量指标，正式评估仍需接入标签或评估接口。",
@@ -200,6 +204,8 @@ class ChangeMonitorService:
                 "after": after,
                 "aggregate": agg,
                 "top_patches": rows[:10],
+                "custom_model_id": model_id,
+                "custom_class": custom_class,
             },
             charts=[basemap] if basemap else [],
             data_table=table,
@@ -228,3 +234,28 @@ class ChangeMonitorService:
         if gained and lost and min(gained, lost) / max(gained, lost) > 0.6:
             return ["新增与减少面积相当，可能包含较多模型逐期抖动导致的伪变化，解读需谨慎。"]
         return []
+
+    def _method_notes(self, task_id, before, after, model_id, name) -> list[str]:
+        if model_id:
+            return [
+                f"Agent 将请求识别为『{name}·建设扰动监测』（非内置地物），使用自定义模型 {model_id}。",
+                f"调用海淀 embedding-api：{self.config.base_url}，逐 patch 用 POST /models/{model_id}/infer 出两期结果再做像素级 diff。",
+                "自定义模型输出为“目标类=类别色、背景=灰底”的二值图；变化＝两期目标前景掩膜的逐像素差。",
+            ]
+        return [
+            f"Agent 将请求识别为『建设扰动监测』场景，region=haidian、task={task_id}、{before}→{after}。",
+            f"调用海淀 embedding-api：{self.config.base_url}，逐 patch 拉取两期结果做像素级 diff。",
+            "变化＝两期二值前景掩膜的逐像素差；面积按整块 patch 的 UTM 面积换算。",
+        ]
+
+    def _limitations(self, model_id) -> list[str]:
+        common = [
+            "变化来自两期模型输出之差，模型逐期误差会叠加为伪变化，显著斑块建议实地核验。",
+            "面积按整块 patch 聚合，AOI 边界未做像素级裁剪，边缘片区略有高估。",
+        ]
+        if model_id:
+            common.insert(
+                0,
+                "该地物由少量标注样本训练/相似度召回得到，精度仅供参考，不代表官方产品级结果。",
+            )
+        return common

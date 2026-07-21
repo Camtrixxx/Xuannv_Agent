@@ -48,6 +48,9 @@ class ReportRequest:
     # Two-date window for change monitoring (scenario B). Empty for other flows.
     before_time_range: str = ""
     after_time_range: str = ""
+    # Custom-model analysis (non-native object). Empty for native tasks.
+    custom_model_id: str = ""
+    target_object: str = ""
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ReportRequest":
@@ -63,6 +66,8 @@ class ReportRequest:
             aoi=payload.get("aoi") if isinstance(payload.get("aoi"), dict) else {},
             before_time_range=str(payload.get("before_time_range") or "").strip(),
             after_time_range=str(payload.get("after_time_range") or "").strip(),
+            custom_model_id=str(payload.get("custom_model_id") or "").strip(),
+            target_object=str(payload.get("target_object") or "").strip(),
         )
 
 
