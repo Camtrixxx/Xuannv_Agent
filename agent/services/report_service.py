@@ -39,6 +39,71 @@ _SOURCE_DISPLAY = {
     "prototype": "遥感分析流程",
 }
 
+# Injected into report HTML when a result chart carries WGS84 bounds. Runs after
+# the report page loads inside the preview iframe, so the map container already
+# has a real size (avoids the blank-tile issue of initialising while hidden).
+# High德 satellite + roads tiles; result PNG overlaid via L.imageOverlay.
+_RESULT_MAP_JS = """
+(function () {
+  var cfg = __CONFIG__;
+  // 高德瓦片是 GCJ-02（火星坐标系），结果图边界是 WGS84。二者直接叠加会有
+  // ~500m 偏移，需把 WGS84 边界转成 GCJ-02 再叠加，与底图对齐。
+  var A = 6378245.0, EE = 0.00669342162296594323;
+  function tLat(x, y) {
+    var r = -100 + 2*x + 3*y + 0.2*y*y + 0.1*x*y + 0.2*Math.sqrt(Math.abs(x));
+    r += (20*Math.sin(6*x*Math.PI) + 20*Math.sin(2*x*Math.PI)) * 2/3;
+    r += (20*Math.sin(y*Math.PI) + 40*Math.sin(y/3*Math.PI)) * 2/3;
+    r += (160*Math.sin(y/12*Math.PI) + 320*Math.sin(y*Math.PI/30)) * 2/3;
+    return r;
+  }
+  function tLng(x, y) {
+    var r = 300 + x + 2*y + 0.1*x*x + 0.1*x*y + 0.1*Math.sqrt(Math.abs(x));
+    r += (20*Math.sin(6*x*Math.PI) + 20*Math.sin(2*x*Math.PI)) * 2/3;
+    r += (20*Math.sin(x*Math.PI) + 40*Math.sin(x/3*Math.PI)) * 2/3;
+    r += (150*Math.sin(x/12*Math.PI) + 300*Math.sin(x/30*Math.PI)) * 2/3;
+    return r;
+  }
+  function wgs2gcj(lng, lat) {
+    var dLat = tLat(lng - 105, lat - 35), dLng = tLng(lng - 105, lat - 35);
+    var rad = lat / 180 * Math.PI, m = Math.sin(rad); m = 1 - EE*m*m;
+    var sm = Math.sqrt(m);
+    dLat = (dLat * 180) / ((A * (1 - EE)) / (m * sm) * Math.PI);
+    dLng = (dLng * 180) / (A / sm * Math.cos(rad) * Math.PI);
+    return [lng + dLng, lat + dLat];
+  }
+  function init() {
+    var el = document.getElementById('resultMap');
+    if (!el || !window.L) { return; }
+    var b = cfg.bounds; // [minLon, minLat, maxLon, maxLat] in WGS84
+    var sw = wgs2gcj(b[0], b[1]), ne = wgs2gcj(b[2], b[3]);
+    var latLng = [[sw[1], sw[0]], [ne[1], ne[0]]];
+    var map = L.map(el, {zoomControl: true, attributionControl: false});
+    var sat = L.tileLayer('https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
+      {subdomains: ['1','2','3','4'], maxZoom: 19}).addTo(map);
+    var labels = L.tileLayer('https://webst0{s}.is.autonavi.com/appmaptile?style=8&x={x}&y={y}&z={z}',
+      {subdomains: ['1','2','3','4'], maxZoom: 19});
+    var overlay = L.imageOverlay(cfg.url, latLng, {opacity: 0.7, interactive: false}).addTo(map);
+    map.fitBounds(latLng);
+    L.control.layers({'卫星影像': sat}, {'专题结果': overlay, '道路注记': labels},
+      {position: 'topright', collapsed: false}).addTo(map);
+    var slider = document.getElementById('mapOpacity');
+    var val = document.getElementById('mapOpacityVal');
+    if (slider) {
+      slider.addEventListener('input', function () {
+        overlay.setOpacity(slider.value / 100);
+        if (val) { val.textContent = slider.value + '%'; }
+      });
+    }
+    setTimeout(function () { map.invalidateSize(); }, 120);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+"""
+
 
 class ReportService:
     def __init__(
@@ -236,6 +301,8 @@ class ReportService:
         generated_at = (analysis.generated_at or datetime.now(timezone.utc).isoformat(timespec="seconds"))[:10]
         source = _SOURCE_DISPLAY.get(analysis.data_source, "遥感分析模型")
 
+        map_section, map_head, map_script = self._result_map_html(analysis)
+
         data_section = ""
         if charts_html or table_html:
             data_section = f"""
@@ -305,7 +372,8 @@ class ReportService:
     figcaption {{ margin-top:8px; color:var(--muted); font-size:13px; }}
     figcaption b {{ display:block; color:var(--ink); font-size:14px; margin-bottom:2px; }}
     .dist {{ margin-top:20px; display:grid; gap:10px; }}
-    .dist .row {{ display:grid; grid-template-columns:110px 1fr 62px; align-items:center; gap:10px; font-size:14px; }}
+    .dist .row {{ display:grid; grid-template-columns:110px 1fr 62px 76px; align-items:center; gap:10px; font-size:14px; }}
+    .dist .area {{ text-align:right; color:var(--muted); font-variant-numeric:tabular-nums; }}
     .dist .bar {{ background:#eef2f7; border-radius:999px; height:12px; overflow:hidden; }}
     .dist .bar i {{ display:block; height:100%; background:linear-gradient(90deg,#2563eb,#0f766e); border-radius:999px; }}
     .dist .pct {{ text-align:right; color:var(--muted); font-variant-numeric:tabular-nums; }}
@@ -314,8 +382,11 @@ class ReportService:
     .block + .block {{ margin-top:18px; border-top:1px dashed var(--line); padding-top:18px; }}
     .rec ol {{ margin:0; padding-left:22px; display:grid; gap:10px; }}
     .footer {{ margin-top:30px; color:var(--muted); font-size:12.5px; text-align:center; }}
-    @media (max-width:720px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .dist .row {{ grid-template-columns:84px 1fr 52px; }} }}
-  </style>
+    @media (max-width:720px) {{ .metrics {{ grid-template-columns:repeat(2,1fr); }} .dist .row {{ grid-template-columns:84px 1fr 52px 64px; }} }}
+    .result-map {{ width:100%; height:420px; border-radius:10px; overflow:hidden; border:1px solid var(--line); background:#dbe6de; }}
+    .map-controls {{ display:flex; align-items:center; gap:10px; margin-top:12px; font-size:13px; color:var(--muted); }}
+    .map-controls input[type="range"] {{ flex:1; }}
+  </style>{map_head}
 </head>
 <body>
   <main>
@@ -328,6 +399,7 @@ class ReportService:
 {highlights_section}
 {metrics_section}
 {data_section}
+{map_section}
     <section id="analysis">
       <h2 class="section-title">深度解读</h2>
       <div class="card">{analysis_html}</div>
@@ -337,10 +409,53 @@ class ReportService:
       <ol>{rec_html}</ol>
     </section>
     <p class="footer">本报告由遥感报告助手自动生成 · 数据来源：{html.escape(source)} · 生成日期 {html.escape(generated_at)}</p>
-  </main>
+  </main>{map_script}
 </body>
 </html>
 """
+
+    def _result_map_html(self, analysis: AnalysisResult) -> tuple[str, str, str]:
+        """Build an interactive Leaflet map that georeferences the result PNG.
+
+        Returns ``(section_html, head_html, script_html)``. All three are empty
+        when no chart is flagged ``overlay`` with valid WGS84 bounds. The map is
+        embedded in the report HTML itself so it renders inside the right-side
+        preview iframe (and in the standalone/downloaded report).
+        """
+        overlay = next(
+            (
+                c
+                for c in analysis.charts
+                if getattr(c, "overlay", False)
+                and isinstance(getattr(c, "bounds_wgs84", None), list)
+                and len(c.bounds_wgs84) == 4
+            ),
+            None,
+        )
+        if overlay is None:
+            return "", "", ""
+
+        head = (
+            '\n  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">'
+            '\n  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>'
+        )
+        section = f"""
+    <section class="card" id="result-map">
+      <h2>在地图上查看结果</h2>
+      <div class="result-map" id="resultMap"></div>
+      <div class="map-controls">
+        <span>结果透明度</span>
+        <input type="range" min="0" max="100" value="70" id="mapOpacity">
+        <span id="mapOpacityVal">70%</span>
+      </div>
+      <p class="footer" style="text-align:left;margin-top:10px">{html.escape(overlay.caption)}</p>
+    </section>"""
+        cfg = json.dumps(
+            {"url": overlay.url, "bounds": [float(v) for v in overlay.bounds_wgs84]},
+            ensure_ascii=False,
+        )
+        script = "\n  <script>\n" + _RESULT_MAP_JS.replace("__CONFIG__", cfg) + "\n  </script>"
+        return section, head, script
 
     def _distribution_html(self, analysis: AnalysisResult) -> str:
         if not analysis.data_table:
@@ -348,7 +463,9 @@ class ReportService:
         rows = "".join(
             f"""<div class="row"><span>{html.escape(str(r.get('label')))}</span>"""
             f"""<span class="bar"><i style="width:{max(1, round(float(r.get('ratio') or 0) * 100)):d}%"></i></span>"""
-            f"""<span class="pct">{float(r.get('ratio') or 0) * 100:.1f}%</span></div>"""
+            f"""<span class="pct">{float(r.get('ratio') or 0) * 100:.1f}%</span>"""
+            + (f"""<span class="area">{float(r.get('value')):.1f} 公顷</span>""" if r.get("value") is not None else "")
+            + "</div>"
             for r in analysis.data_table
         )
         title = html.escape(analysis.data_table_title or "数据分布")
