@@ -39,6 +39,7 @@ REGION_IDS = {
     "雅江": "yajiang",
     "yajiang": "yajiang",
     "哈尔滨新区": "harbin",
+    "哈尔滨区域": "harbin",
     "harbin": "harbin",
     "harbin_new_area": "harbin",
     "北京市海淀区": "haidian",
