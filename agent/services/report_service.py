@@ -13,7 +13,7 @@ from agent.services.common import extract_json_object
 from agent.services.llm_provider import DeepSeekProvider, LLMProvider
 
 
-REPORT_TEMPLATE_VERSION = "agent-report-v6"
+REPORT_TEMPLATE_VERSION = "agent-report-v7"
 
 # Metric cards that are metadata/plumbing rather than business findings. These are
 # already conveyed by the header chips, so we keep them out of the metric grid.
@@ -74,23 +74,34 @@ _RESULT_MAP_JS = """
   function init() {
     var el = document.getElementById('resultMap');
     if (!el || !window.L) { return; }
-    var b = cfg.bounds; // [minLon, minLat, maxLon, maxLat] in WGS84
-    var sw = wgs2gcj(b[0], b[1]), ne = wgs2gcj(b[2], b[3]);
-    var latLng = [[sw[1], sw[0]], [ne[1], ne[0]]];
+    var overlays = cfg.overlays || [];
+    if (!overlays.length) { return; }
+    var allBounds = [];
+    var layerMap = {};
+    overlays.forEach(function (item, index) {
+      var b = item.bounds;
+      var sw = wgs2gcj(b[0], b[1]), ne = wgs2gcj(b[2], b[3]);
+      var latLng = [[sw[1], sw[0]], [ne[1], ne[0]]];
+      allBounds.push(latLng[0], latLng[1]);
+      var name = item.title || ('专题结果 ' + (index + 1));
+      layerMap[name] = L.imageOverlay(item.url, latLng, {opacity: 0.7, interactive: false});
+    });
     var map = L.map(el, {zoomControl: true, attributionControl: false});
     var sat = L.tileLayer('https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
       {subdomains: ['1','2','3','4'], maxZoom: 19}).addTo(map);
     var labels = L.tileLayer('https://webst0{s}.is.autonavi.com/appmaptile?style=8&x={x}&y={y}&z={z}',
       {subdomains: ['1','2','3','4'], maxZoom: 19});
-    var overlay = L.imageOverlay(cfg.url, latLng, {opacity: 0.7, interactive: false}).addTo(map);
-    map.fitBounds(latLng);
-    L.control.layers({'卫星影像': sat}, {'专题结果': overlay, '道路注记': labels},
+    Object.keys(layerMap).forEach(function (name) { layerMap[name].addTo(map); });
+    map.fitBounds(allBounds);
+    L.control.layers({'卫星影像': sat}, Object.assign(layerMap, {'道路注记': labels}),
       {position: 'topright', collapsed: false}).addTo(map);
     var slider = document.getElementById('mapOpacity');
     var val = document.getElementById('mapOpacityVal');
     if (slider) {
       slider.addEventListener('input', function () {
-        overlay.setOpacity(slider.value / 100);
+        Object.keys(layerMap).forEach(function (name) {
+          if (name !== '道路注记') { layerMap[name].setOpacity(slider.value / 100); }
+        });
         if (val) { val.textContent = slider.value + '%'; }
       });
     }
@@ -169,7 +180,9 @@ class ReportService:
             "写作要求：结论先行，层次分明，语言专业但通俗易懂；聚焦“数据说明了什么、"
             "对业务意味着什么、下一步该怎么做”。不要罗列系统参数、接口字段或免责声明，"
             "不要出现模型文件、服务地址、patch 编号等技术细节。必须忠于给定数据，"
-            "严禁编造未提供的数字、坐标或事件。只输出 JSON，不要输出多余文字。"
+            "严禁编造未提供的数字、坐标或事件；不得引入输入中没有的行业阈值、典型范围、"
+            "比较基准、因果归因或可靠性评级。没有明确精度证据时，不得声称结果可靠、准确或"
+            "可直接替代现场核查。只输出 JSON，不要输出多余文字。"
         )
         payload = json.dumps(
             {
@@ -184,18 +197,21 @@ class ReportService:
                 ],
                 "发现线索": analysis.findings,
                 "风险线索": analysis.risks,
+                "方法与数据边界": [*analysis.method_notes, *analysis.limitations, *analysis.confidence_notes],
                 "图表": [{"标题": c.title, "说明": c.caption} for c in analysis.charts],
                 "输出格式": {
                     "summary": "结论先行的执行摘要，160-240字，讲清区域、时间、任务的核心结论与业务价值",
                     "highlights": "3-5 条核心要点，每条一句话、可独立成立，最重要的结论排在最前",
                     "analysis": "2-4 个深度解读小节；每节为 {title: 小标题, text: 180-280字的详实分析}，"
-                    "覆盖空间格局、主导特征、值得关注的信号、结果可靠性等",
+                    "覆盖空间格局、主导特征、值得关注的信号和数据边界；没有空间证据时不要推断聚集性",
                     "recommendations": "3-5 条可执行的建议或风险提醒，务实、面向行动",
                 },
                 "禁止": [
                     "不要出现模型文件路径、服务地址、patch 编号、接口字段、坐标系等系统内部信息",
                     "不要出现 mock、占位、模拟、原型等字样",
                     "不要编造输入中没有的具体数字、坐标或真实事件",
+                    "不要用外部常识补充典型阈值、行业平均值或对比基准",
+                    "不要把全区域任务可用性摘要解释为本次选区的空间结论",
                 ],
             },
             ensure_ascii=False,
@@ -293,6 +309,7 @@ class ReportService:
             for c in analysis.charts
         )
         table_html = self._distribution_html(analysis)
+        patch_detail_html = self._patch_results_html(analysis)
         analysis_html = "".join(
             f"""<section class="block"><h3>{html.escape(b["title"])}</h3><p>{html.escape(b["text"])}</p></section>"""
             for b in content["analysis"]
@@ -304,12 +321,13 @@ class ReportService:
         map_section, map_head, map_script = self._result_map_html(analysis)
 
         data_section = ""
-        if charts_html or table_html:
+        if charts_html or table_html or patch_detail_html:
             data_section = f"""
     <section class="card" id="data">
       <h2>结果图与数据</h2>
       <div class="figures">{charts_html}</div>
       {table_html}
+      {patch_detail_html}
     </section>"""
 
         highlights_section = ""
@@ -377,6 +395,10 @@ class ReportService:
     .dist .bar {{ background:#eef2f7; border-radius:999px; height:12px; overflow:hidden; }}
     .dist .bar i {{ display:block; height:100%; background:linear-gradient(90deg,#2563eb,#0f766e); border-radius:999px; }}
     .dist .pct {{ text-align:right; color:var(--muted); font-variant-numeric:tabular-nums; }}
+    .patch-table {{ width:100%; border-collapse:collapse; margin-top:20px; font-size:13px; }}
+    .patch-table th, .patch-table td {{ padding:9px 8px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }}
+    .patch-table th {{ color:var(--muted); font-weight:600; }}
+    .patch-ok {{ color:#047857; font-weight:700; }} .patch-failed {{ color:#b91c1c; font-weight:700; }}
     .block h3 {{ margin:0 0 8px; font-size:16px; color:var(--accent); }}
     .block p {{ margin:0; color:#374151; }}
     .block + .block {{ margin-top:18px; border-top:1px dashed var(--line); padding-top:18px; }}
@@ -422,17 +444,15 @@ class ReportService:
         embedded in the report HTML itself so it renders inside the right-side
         preview iframe (and in the standalone/downloaded report).
         """
-        overlay = next(
-            (
-                c
-                for c in analysis.charts
-                if getattr(c, "overlay", False)
-                and isinstance(getattr(c, "bounds_wgs84", None), list)
-                and len(c.bounds_wgs84) == 4
-            ),
-            None,
-        )
-        if overlay is None:
+        overlays = [
+            c
+            for c in analysis.charts
+            if getattr(c, "overlay", False)
+            and isinstance(getattr(c, "bounds_wgs84", None), list)
+            and len(c.bounds_wgs84) == 4
+            and getattr(c, "url", "")
+        ]
+        if not overlays:
             return "", "", ""
 
         head = (
@@ -448,10 +468,19 @@ class ReportService:
         <input type="range" min="0" max="100" value="70" id="mapOpacity">
         <span id="mapOpacityVal">70%</span>
       </div>
-      <p class="footer" style="text-align:left;margin-top:10px">{html.escape(overlay.caption)}</p>
+      <p class="footer" style="text-align:left;margin-top:10px">地图包含 {len(overlays)} 个 patch 结果图层，可在右上角逐层开关。</p>
     </section>"""
         cfg = json.dumps(
-            {"url": overlay.url, "bounds": [float(v) for v in overlay.bounds_wgs84]},
+            {
+                "overlays": [
+                    {
+                        "url": c.url,
+                        "bounds": [float(v) for v in c.bounds_wgs84],
+                        "title": c.title or getattr(c, "patch_id", "") or f"专题结果 {index + 1}",
+                    }
+                    for index, c in enumerate(overlays)
+                ]
+            },
             ensure_ascii=False,
         )
         script = "\n  <script>\n" + _RESULT_MAP_JS.replace("__CONFIG__", cfg) + "\n  </script>"
@@ -470,6 +499,33 @@ class ReportService:
         )
         title = html.escape(analysis.data_table_title or "数据分布")
         return f"""<h3 style="margin:22px 0 4px;font-size:15px;">{title}</h3><div class="dist">{rows}</div>"""
+
+    def _patch_results_html(self, analysis: AnalysisResult) -> str:
+        if not analysis.patch_results:
+            return ""
+        rows = []
+        for item in analysis.patch_results:
+            patch_id = html.escape(str(item.get("patch_id") or "暂无"))
+            status = str(item.get("status") or "unknown")
+            if status == "ok":
+                metrics = item.get("metrics") or {}
+                ratio = metrics.get("coverage_ratio", metrics.get("foreground_ratio"))
+                if ratio is not None:
+                    measure = f"覆盖率 {float(ratio) * 100:.1f}%"
+                elif metrics.get("class_distribution"):
+                    measure = f"{len(metrics['class_distribution'])} 类"
+                else:
+                    measure = "已获取结果"
+                status_html = '<span class="patch-ok">已完成</span>'
+            else:
+                measure = str(item.get("error") or "获取失败")
+                status_html = '<span class="patch-failed">未完成</span>'
+            rows.append(f"<tr><td>{patch_id}</td><td>{status_html}</td><td>{html.escape(measure)}</td></tr>")
+        return (
+            '<h3 style="margin:22px 0 4px;font-size:15px;">Patch 处理明细</h3>'
+            '<table class="patch-table"><thead><tr><th>Patch</th><th>状态</th><th>结果</th></tr></thead>'
+            f"<tbody>{''.join(rows)}</tbody></table>"
+        )
 
     def _render_markdown(
         self,
@@ -496,7 +552,7 @@ class ReportService:
                 lines.append(f"- **{m.label}**：{m.value}{suffix}")
             lines.append("")
 
-        if analysis.charts or analysis.data_table:
+        if analysis.charts or analysis.data_table or analysis.patch_results:
             lines += ["## 结果图与数据", ""]
             for c in analysis.charts:
                 lines += [f"![{c.title}]({c.url})", "", f"*{c.caption}*", ""]
@@ -504,6 +560,20 @@ class ReportService:
                 lines += [f"### {analysis.data_table_title or '数据分布'}", "", "| 类别 | 占比 |", "| --- | --- |"]
                 for r in analysis.data_table:
                     lines.append(f"| {r.get('label')} | {float(r.get('ratio') or 0) * 100:.1f}% |")
+                lines.append("")
+            if analysis.patch_results:
+                lines += ["### Patch 处理明细", "", "| Patch | 状态 | 结果 |", "| --- | --- | --- |"]
+                for item in analysis.patch_results:
+                    status = "已完成" if item.get("status") == "ok" else "未完成"
+                    metrics = item.get("metrics") or {}
+                    ratio = metrics.get("coverage_ratio", metrics.get("foreground_ratio"))
+                    if ratio is not None:
+                        result = f"覆盖率 {float(ratio) * 100:.1f}%"
+                    elif metrics.get("class_distribution"):
+                        result = f"{len(metrics['class_distribution'])} 类"
+                    else:
+                        result = str(item.get("error") or "已获取结果")
+                    lines.append(f"| {item.get('patch_id', '暂无')} | {status} | {result} |")
                 lines.append("")
 
         lines += ["## 深度解读", ""]
