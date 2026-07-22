@@ -68,11 +68,9 @@ class HarbinEmbeddingAnalysisService:
         result = self._infer_system_model(task_id, patch_id, request.time_range) if task_id in SYSTEM_MODEL_TASKS else {}
         classes = self._get_classes(task_id) if task_id in SYSTEM_MODEL_TASKS else []
         task_summary = self._get_task_summary(task_id) if task_id in STATIC_TASKS else {}
-        embedding_url = self._embedding_url(patch_id, request.time_range)
-        embedding_asset_url = self._copy_remote_asset(embedding_url, request, task_id, "embedding")
 
         task_display = TASK_DISPLAY.get(task_id, request.task)
-        charts = self._build_charts(request, task_id, task_display, patch_id, result, embedding_asset_url)
+        charts = self._build_charts(request, task_id, task_display, patch_id, result)
         basemap = basemap_chart(patch.get("bounds_wgs84"), self.asset_dir, f"harbin-{patch_id}")
         if basemap:
             charts = [basemap, *charts]
@@ -255,10 +253,6 @@ class HarbinEmbeddingAnalysisService:
         payload = self._get_json(f"/regions/harbin/tasks/{task_id}/summary?version=v1")
         return payload if isinstance(payload, dict) else {}
 
-    def _embedding_url(self, patch_id: str, month: str) -> str:
-        query = urlencode({"format": "png", "version": self.config.version, "month": month})
-        return f"/regions/harbin/patches/{patch_id}/embedding?{query}"
-
     def _get_json(self, path: str) -> Any:
         return self._request_json(path, method="GET")
 
@@ -282,7 +276,6 @@ class HarbinEmbeddingAnalysisService:
         task_display: str,
         patch_id: str,
         system_result: dict[str, Any],
-        embedding_asset_url: str,
     ) -> list[ChartAsset]:
         charts: list[ChartAsset] = []
         if task_id in STATIC_TASKS:
@@ -307,14 +300,6 @@ class HarbinEmbeddingAnalysisService:
                     caption="系统预训练模型基于指定月份 embedding 生成的 patch 级实时推理结果。",
                 )
             )
-        charts.append(
-            ChartAsset(
-                title="Embedding 可视化预览",
-                kind="image",
-                url=embedding_asset_url,
-                caption="将高维 embedding 映射为 RGB 预览图，用于辅助观察 patch 表征差异。",
-            )
-        )
         return charts
 
     def _build_metrics(
@@ -405,7 +390,7 @@ class HarbinEmbeddingAnalysisService:
     def _build_recommendations(self, task_id: str) -> list[str]:
         common = [
             "后续应把区域选择替换为 AOI 到 patch 的空间检索，并对多个 patch 做汇总统计。",
-            "前端展示时建议同时呈现 embedding 预览和模型结果图，便于解释模型输入表征与输出之间的关系。",
+            "建议将模型结果图与业务底图叠加解读，重点核对目标边界和疑似误检区域。",
         ]
         if task_id == "water_extraction":
             return ["水体边界建议结合多月份结果复核，区分季节性水位变化与稳定水面。", *common]
