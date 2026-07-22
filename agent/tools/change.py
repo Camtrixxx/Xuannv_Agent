@@ -91,6 +91,30 @@ def binary_change(
     }
 
 
+# Change-map colours: gained (0→1) red, lost (1→0) blue, everything else clear.
+CHANGE_GAINED_RGBA = (220, 38, 38, 255)
+CHANGE_LOST_RGBA = (37, 99, 235, 255)
+
+
+def change_rgba(mask_before: np.ndarray, mask_after: np.ndarray) -> np.ndarray:
+    """Render a two-date change into an HxWx4 uint8 RGBA array.
+
+    Gained pixels (0→1) are red, lost pixels (1→0) are blue; unchanged pixels
+    (stayed or background) are fully transparent so the satellite basemap shows
+    through when the PNG is overlaid on the report map. Pure numpy so it stays
+    unit-testable; the service layer saves it to a PNG.
+    """
+    if mask_before.shape != mask_after.shape:
+        raise ValueError(f"mask shape mismatch: {mask_before.shape} vs {mask_after.shape}")
+    gained = ~mask_before & mask_after
+    lost = mask_before & ~mask_after
+    h, w = mask_before.shape
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    rgba[gained] = CHANGE_GAINED_RGBA
+    rgba[lost] = CHANGE_LOST_RGBA
+    return rgba
+
+
 def aggregate_change(per_patch: Iterable[dict[str, Any]]) -> dict[str, Any]:
     """Sum per-patch change dicts into an AOI-wide change summary.
 

@@ -9,17 +9,26 @@ Haidian only in v1. Model accuracy is upstream; we report change faithfully.
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 from typing import Any
 
+from PIL import Image
+
 from agent.config import EmbeddingAPIConfig, ReportConfig
-from agent.schemas.report import AnalysisResult, MetricCard, ReportRequest
+from agent.schemas.report import AnalysisResult, ChartAsset, MetricCard, ReportRequest
 from agent.services.aoi_cover_service import AoiCoverService
 from agent.services.haidian_embedding_service import TASK_DISPLAY, TASK_TO_HAIDIAN
 from agent.services.model_registry_service import ModelRegistryService
 from agent.services.patch_selection_service import PatchSelectionService
 from agent.services.satellite_basemap import basemap_chart
-from agent.tools.change import aggregate_change, binary_change, custom_model_mask, mask_for_task
+from agent.tools.change import (
+    aggregate_change,
+    binary_change,
+    change_rgba,
+    custom_model_mask,
+    mask_for_task,
+)
 
 # Tasks meaningful to monitor over a short window (built environment dynamics).
 CHANGE_TASKS = {"construction", "building_extraction", "road_extraction", "water_extraction"}
@@ -64,7 +73,7 @@ class ChangeMonitorService:
         if not patches:
             raise RuntimeError("当前框选范围内没有可用于监测的 patch，请调整范围或月份。")
 
-        per_patch, rows = self._diff_patches(region_id, task_id, before, after, patches, model_id)
+        per_patch, rows, overlays = self._diff_patches(region_id, task_id, before, after, patches, model_id)
         agg = aggregate_change(per_patch)
         if agg["patch_count"] == 0:
             raise RuntimeError("两期结果均无法获取，无法计算变化。请更换月份或范围。")
@@ -72,7 +81,7 @@ class ChangeMonitorService:
         # honest about method + feature source (and warn on AEF annual features).
         model_info = self.registry.model_status(model_id, region_id) if model_id else None
         return self._build_result(
-            request, task_id, before, after, agg, rows, model_id, custom_class, model_info
+            request, task_id, before, after, agg, rows, model_id, custom_class, model_info, overlays
         )
 
     def _resolve_task(self, task: str) -> str:
@@ -109,9 +118,15 @@ class ChangeMonitorService:
         return bbox
 
     def _diff_patches(self, region_id, task_id, before, after, patches, model_id=""):
-        """Return (per_patch_change_dicts, table_rows). Skips patches missing a date."""
+        """Return (per_patch_change_dicts, table_rows, overlay_charts).
+
+        Skips patches missing a date. For every patch that diffs, also renders a
+        change-map PNG (gained red / lost blue / transparent elsewhere) as an
+        ``overlay=True`` ChartAsset so the report map can georeference it.
+        """
         per_patch: list[dict[str, Any]] = []
         rows: list[dict[str, Any]] = []
+        overlays: list[ChartAsset] = []
         for patch in patches:
             patch_id = str(patch.get("patch_id") or "")
             if not patch_id:
@@ -142,11 +157,43 @@ class ChangeMonitorService:
                     "net_ha": change["net_ha"],
                 }
             )
+            overlay = self._change_overlay(patch, patch_id, task_id, before, after, mask_a, mask_b)
+            if overlay is not None:
+                overlays.append(overlay)
         # Rank the table by net growth so the biggest movers surface first.
         rows.sort(key=lambda r: (r["net_ha"] if r["net_ha"] is not None else 0), reverse=True)
-        return per_patch, rows
+        return per_patch, rows, overlays
 
-    def _build_result(self, request, task_id, before, after, agg, rows, model_id="", custom_class="", model_info=None) -> AnalysisResult:
+    def _change_overlay(self, patch, patch_id, task_id, before, after, mask_a, mask_b) -> ChartAsset | None:
+        """Render one patch's change mask to a PNG and wrap it as a map overlay.
+
+        Returns None when the patch has no WGS84 bounds (nothing to georeference)
+        or the PNG can't be written — the report simply omits that layer.
+        """
+        bounds = [float(v) for v in (patch.get("bounds_wgs84") or [])][:4]
+        if len(bounds) != 4:
+            return None
+        try:
+            rgba = change_rgba(mask_a, mask_b)
+        except ValueError:
+            return None
+        digest = hashlib.sha1(f"{patch_id}:{task_id}:{before}:{after}".encode("utf-8")).hexdigest()[:12]
+        out_path = self.asset_dir / f"haidian_change_{task_id}_{patch_id}_{digest}.png"
+        try:
+            Image.fromarray(rgba, mode="RGBA").save(out_path)
+        except (OSError, ValueError):
+            return None
+        return ChartAsset(
+            title=f"变化专题 · {patch_id}",
+            kind="image",
+            url=f"/reports/assets/{out_path.name}",
+            caption="红色为新增、蓝色为减少的目标区域（两期逐像素差）。",
+            bounds_wgs84=bounds,
+            overlay=True,
+            patch_id=patch_id,
+        )
+
+    def _build_result(self, request, task_id, before, after, agg, rows, model_id="", custom_class="", model_info=None, overlays=None) -> AnalysisResult:
         region = "北京市海淀区"
         # Custom-model runs show the user's own class name; native runs use the
         # built-in task display name.
@@ -166,6 +213,9 @@ class ChangeMonitorService:
             metrics.append(MetricCard("增长率", f"{agg['growth_ratio'] * 100:+.1f}%", f"相对 {b_disp} 存量"))
 
         basemap = basemap_chart(self._bbox(request.aoi), self.asset_dir, f"change-{request.session_id}")
+        # Satellite basemap first, then one change-map overlay per patch so the
+        # report's Leaflet map georeferences red=gained / blue=lost onto it.
+        charts = ([basemap] if basemap else []) + list(overlays or [])
         table = [
             {"label": r["label"], "ratio": None, "value": r["net_ha"]}
             for r in rows[:10]
@@ -193,6 +243,7 @@ class ChangeMonitorService:
                     "text": (
                         f"两期结果 PNG 逐像素对齐后按前景变化统计：新增＝后期为{name}前景、前期不是；"
                         f"减少反之。面积按相交 patch 的 UTM 面积换算，命中 {agg['patch_count']} 个 patch。"
+                        "地图上红色为新增区域、蓝色为减少区域，未变化区域透明。"
                     ),
                 },
             ],
@@ -215,7 +266,7 @@ class ChangeMonitorService:
                 "custom_model_id": model_id,
                 "custom_class": custom_class,
             },
-            charts=[basemap] if basemap else [],
+            charts=charts,
             data_table=table,
             data_table_title=f"各 patch 净变化 TOP（公顷）" if table else "",
         )

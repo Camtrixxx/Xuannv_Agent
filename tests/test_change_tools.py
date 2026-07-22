@@ -5,7 +5,15 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from agent.tools.change import aggregate_change, binary_change, foreground_mask, mask_for_task
+from agent.tools.change import (
+    CHANGE_GAINED_RGBA,
+    CHANGE_LOST_RGBA,
+    aggregate_change,
+    binary_change,
+    change_rgba,
+    foreground_mask,
+    mask_for_task,
+)
 
 WHITE = (255, 255, 255)
 RED = (230, 0, 0)
@@ -82,3 +90,29 @@ def test_aggregate_change_empty():
     assert out["patch_count"] == 0
     assert out["net_area_ha"] is None
     assert out["growth_ratio"] is None
+
+
+def test_change_rgba_colours_gained_and_lost():
+    # before: left half foreground; after: right half foreground (disjoint).
+    before = np.zeros((4, 4), dtype=bool)
+    before[:, :2] = True
+    after = np.zeros((4, 4), dtype=bool)
+    after[:, 2:] = True
+    rgba = change_rgba(before, after)
+    assert rgba.shape == (4, 4, 4)
+    # Gained (0→1) on the right → red; lost (1→0) on the left → blue.
+    assert tuple(rgba[0, 3]) == CHANGE_GAINED_RGBA
+    assert tuple(rgba[0, 0]) == CHANGE_LOST_RGBA
+
+
+def test_change_rgba_unchanged_is_transparent():
+    m = np.zeros((4, 4), dtype=bool)
+    m[0, 0] = True  # stays foreground both dates
+    rgba = change_rgba(m, m)
+    # Every pixel unchanged → fully transparent (alpha 0) so basemap shows through.
+    assert int(rgba[..., 3].max()) == 0
+
+
+def test_change_rgba_shape_mismatch_raises():
+    with pytest.raises(ValueError, match="shape mismatch"):
+        change_rgba(np.zeros((4, 4), dtype=bool), np.zeros((4, 5), dtype=bool))

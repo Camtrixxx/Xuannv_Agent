@@ -71,6 +71,27 @@ def test_change_reports_growth(monkeypatch):
     assert any("净变化" in l for l in labels)
 
 
+def test_change_emits_map_overlays(monkeypatch, tmp_path):
+    # A patch with WGS84 bounds should produce an overlay=True change PNG per
+    # patch so the report map can georeference red=gained / blue=lost.
+    wgs = [116.20, 39.88, 116.26, 39.92]
+    patches = [
+        {"patch_id": "p1", "bounds": BOUNDS, "bounds_wgs84": wgs},
+        {"patch_id": "p2", "bounds": BOUNDS, "bounds_wgs84": wgs},
+    ]
+    arrays = {"202512": _img(10), "202605": _img(30)}
+    svc = _svc_with(monkeypatch, patches, arrays)
+    svc.asset_dir = tmp_path
+    res = svc.analyze(_req())
+
+    overlays = [c for c in res.charts if getattr(c, "overlay", False)]
+    assert len(overlays) == 2
+    for c in overlays:
+        assert c.bounds_wgs84 == wgs
+        assert c.url.startswith("/reports/assets/")
+        assert (tmp_path / c.url.rsplit("/", 1)[-1]).exists()
+
+
 def test_change_default_task_when_unsupported(monkeypatch):
     patches = [{"patch_id": "p1", "bounds": BOUNDS}]
     arrays = {"202512": _img(5), "202605": _img(5)}
