@@ -19,6 +19,16 @@ def _get_int(name: str, default: int) -> int:
         return default
 
 
+def _get_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 def _get_list(name: str, default: list[str]) -> list[str]:
     raw = os.getenv(name)
     if raw is None:
@@ -89,8 +99,21 @@ class EmbeddingAPIConfig:
         default_factory=lambda: os.getenv("AGENT_EMBEDDING_API_BASE_URL", "http://60.31.21.42:22065")
     )
     timeout: int = field(default_factory=lambda: _get_int("AGENT_EMBEDDING_API_TIMEOUT", 90))
+    # Patch metadata is read interactively from the remote service. A few
+    # short retries make transient connect/read failures invisible to users
+    # without changing the retry policy of inference requests.
+    patch_search_attempts: int = field(
+        default_factory=lambda: max(1, _get_int("AGENT_PATCH_SEARCH_ATTEMPTS", 3))
+    )
+    patch_search_backoff: float = field(
+        default_factory=lambda: max(0.0, _get_float("AGENT_PATCH_SEARCH_BACKOFF", 0.35))
+    )
     version: str = field(default_factory=lambda: os.getenv("AGENT_HARBIN_EMBEDDING_VERSION", "v2"))
     sample_count: int = field(default_factory=lambda: _get_int("AGENT_HARBIN_SAMPLE_COUNT", 1))
+    # Maximum number of explicitly selected or AOI-matched patches used by a
+    # regional report. This keeps a map selection from producing an unbounded
+    # number of remote requests and report layers.
+    max_selected_patches: int = field(default_factory=lambda: max(1, _get_int("AGENT_MAX_SELECTED_PATCHES", 8)))
 
 
 @dataclass(slots=True)

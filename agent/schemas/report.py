@@ -113,6 +113,8 @@ class ChartAsset:
     # on-map result layer (vs. a plain inline figure).
     bounds_wgs84: list[float] = field(default_factory=list)
     overlay: bool = False
+    # Optional owner used by multi-patch reports and map layer controls.
+    patch_id: str = ""
 
 
 @dataclass(slots=True)
@@ -138,6 +140,9 @@ class AnalysisResult:
     # (e.g. land-cover class shares). Each row: {label, ratio, value?}.
     data_table: list[dict[str, Any]] = field(default_factory=list)
     data_table_title: str = ""
+    # Optional per-patch records. Existing services can continue to return an
+    # empty list while multi-patch regional services expose their detail rows.
+    patch_results: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
