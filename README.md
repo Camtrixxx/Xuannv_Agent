@@ -118,6 +118,7 @@ POST /api/session/reset
 | `AGENT_PORT` | `7870` | Agent 服务端口 |
 | `AGENT_AEF_BASE_URL` | `http://127.0.0.1:7862` | 雅江 AEF 推理服务地址 |
 | `AGENT_EMBEDDING_API_BASE_URL` | `http://60.31.21.42:22065` | 哈尔滨/海淀 embedding-api 地址 |
+| `AGENT_MAX_SELECTED_PATCHES` | `8` | 海淀普通报告单次处理的最大 patch 数 |
 | `AGENT_CORS_ORIGINS` | `*` | CORS 来源 |
 | `AEF_CODE_ROOT` | `/data/heyuhang/yajiang-aef` | 外部 AEF 模型工程根目录 |
 | `AEF_PORT` | `7862` | AEF 推理服务端口 |

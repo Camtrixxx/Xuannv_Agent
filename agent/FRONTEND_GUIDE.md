@@ -91,6 +91,8 @@ Content-Type: application/json
 
 `task` 和 `time_range` 可以为空，适合“先框选、后补任务/月”的交互。如果前端已经知道任务和月份，也可以传入，后端会提前过滤。
 
+前端应先确认 bbox 是 `[minLng, minLat, maxLng, maxLat]` 且四个值为有限数字。响应 `status=invalid` 时提示用户重新框选；`status=retryable_error` 时提示稍后重试，不要把它当成报告生成失败。
+
 ### 3. 展示候选 patch
 
 响应里的关键字段：
@@ -117,7 +119,8 @@ Content-Type: application/json
 
 - 默认选中第一个 patch。
 - 用 `bounds_wgs84` 在地图上画候选 patch 矩形。
-- 用户点击候选项时，更新 `selectedPatchIds = [patch_id]`。
+- 用户点击候选项时切换该项的选中状态，保留完整 `selectedPatchIds` 数组。
+- 默认最多选择 8 个 patch；达到上限时提示用户先取消一个或缩小框选范围。
 - 可以展示 `score`、可用月份、可用任务，但不要求展示全部元数据。
 
 ## 生成报告
@@ -137,7 +140,7 @@ Content-Type: application/json
   "region": "北京市海淀区",
   "task": "建筑物提取",
   "prompt": "给我一份2025年12月建筑物提取报告",
-  "selected_patch_ids": ["patch_000020"],
+  "selected_patch_ids": ["patch_000020", "patch_000021"],
   "aoi": {
     "type": "bbox",
     "coordinates": [116.24, 39.88, 116.30, 39.93]
@@ -354,7 +357,8 @@ async function sendReport({sessionId, region, task, prompt, selectedPatchIds, se
 - 地区切换后任务标签同步变化。
 - 地图框选后能调用 `/api/patches/search`。
 - 候选 patch 能在地图上画出边界。
-- 点击候选 patch 后，发送报告请求会携带 `selected_patch_ids` 和 `aoi`。
+- 点击候选 patch 可多选/取消；发送报告请求会携带完整的 `selected_patch_ids` 和 `aoi`。
+- 多 patch 报告能展示合计指标、每个 patch 的处理状态和多个地图图层。
 - `status=needs_input` 时不弹错误，只展示补充提示。
 - `status=chat` 时只展示文本回复。
 - `status=ok` 时展示报告卡片、图片、HTML 预览和 Markdown 入口。

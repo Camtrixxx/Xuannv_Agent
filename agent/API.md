@@ -183,7 +183,7 @@ Agent 只有在用户**明确请求生成报告**时才会生成报告；提问�
 | `region` | 否 | 前端选择的地区。默认 `雅江区域` |
 | `prompt` | 是 | 用户自然语言输入 |
 | `time_range` | 否 | `YYYY-MM`，前端已知月份时可直接传 |
-| `selected_patch_ids` | 否 | 地图选择得到的 patch ID 列表，例如 `["patch_000020"]` |
+| `selected_patch_ids` | 否 | 地图选择得到的 patch ID 列表，例如 `["patch_000020", "patch_000021"]`；海淀普通报告默认最多处理 8 个 |
 | `aoi` | 否 | 地图框选范围，推荐 `{ "type": "bbox", "coordinates": [minLng, minLat, maxLng, maxLat] }` |
 | `before_time_range` / `after_time_range` | 否 | 仅建设扰动监测（场景 B）用的两期月份 `YYYY-MM`。前端也可让用户在 `prompt` 里写"2025-12 到 2026-05"由后端抽取 |
 
@@ -351,6 +351,8 @@ absolute_image_url = AGENT_BASE_URL + response.analysis.charts[0].url
 地图选区到 patch 的检索接口。前端框选地图后，把 bbox 交给 Agent，由 Agent 代理查询区域 patch 服务并返回候选 patch。
 
 `task` 和 `time_range` 都可以先传空字符串。这样前端可以支持“先框选地图定位 patch，再让用户选择任务/输入月份”的交互。若传入任务或月份，后端会尽量提前过滤出支持该任务/月份的 patch。
+
+检索失败时也会返回 JSON 状态，便于前端给出可操作提示：`invalid` 表示 bbox 缺失、坐标无效或框选退化，应重新框选；`retryable_error` 表示上游 patch 服务在自动重试后仍暂时不可用，应稍后重试。两种状态均不会把用户可恢复的问题伪装成 HTTP 500。
 
 当前支持情况：
 

@@ -1304,8 +1304,11 @@
     let selectStartLatLng = null;
     let selectedAoi = null;
     let selectedPatchIds = [];
+    const maxPatchSelection = 8;
     let selectedPatchRegion = "";
     let candidatePatches = [];
+    let patchSearchController = null;
+    let patchSearchRequestId = 0;
     let selectionLayer = null;
     let patchLayers = [];
     let mapResizeObserver = null;
@@ -1534,7 +1537,9 @@
     }
 
     function updateMapLabel() {
-      const patchText = selectedPatchIds.length ? ` · ${selectedPatchIds[0]}` : "";
+      const patchText = selectedPatchIds.length === 1
+        ? ` · ${selectedPatchIds[0]}`
+        : (selectedPatchIds.length > 1 ? ` · ${selectedPatchIds.length} 个 patch` : "");
       openMap.textContent = `选择地图：${currentRegion}${patchText}`;
       const data = regionData[currentRegion] || regionData["雅江区域"];
       if (leafletMap) {
@@ -1712,6 +1717,19 @@
         patchStatus.textContent = "当前区域暂不支持地图定位 patch。";
         return;
       }
+      const normalizedBbox = Array.isArray(bbox) && bbox.length === 4
+        ? bbox.map((value) => Number(value))
+        : null;
+      if (!normalizedBbox || normalizedBbox.some((value) => !Number.isFinite(value))
+          || normalizedBbox[0] >= normalizedBbox[2] || normalizedBbox[1] >= normalizedBbox[3]) {
+        patchStatus.textContent = "请拖动出一个矩形范围后再检索 patch。";
+        return;
+      }
+      if (patchSearchController) {
+        patchSearchController.abort();
+      }
+      patchSearchController = new AbortController();
+      const requestId = ++patchSearchRequestId;
       patchStatus.textContent = "正在检索候选 patch。";
       patchList.innerHTML = "";
       patchLayers.forEach((layer) => layer.remove());
@@ -1723,21 +1741,32 @@
         const response = await fetch("/api/patches/search", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
+          signal: patchSearchController.signal,
           body: JSON.stringify({
             region: currentRegion,
             task: currentTask,
             time_range: extractTimeRangeFromPrompt(document.getElementById("prompt").value),
-            bbox,
+            bbox: normalizedBbox,
             limit: 12
           })
         });
         const payload = await response.json();
-        if (!response.ok || payload.status !== "ok") {
+        if (requestId !== patchSearchRequestId) {
+          return;
+        }
+        if (!response.ok) {
           throw new Error(payload.detail || payload.message || "patch 检索失败");
+        }
+        if (payload.status !== "ok") {
+          patchStatus.textContent = payload.message || "当前范围没有可用 patch，请调整范围后重试。";
+          return;
         }
         candidatePatches = payload.patches || [];
         renderPatchCandidates(payload.message || "");
       } catch (error) {
+        if (error.name === "AbortError" || requestId !== patchSearchRequestId) {
+          return;
+        }
         patchStatus.textContent = `检索失败：${error.message || "未知错误"}`;
       }
     }
@@ -1747,27 +1776,35 @@
         patchStatus.textContent = message || "当前范围没有找到可用 patch。";
         return;
       }
-      selectedPatchIds = [candidatePatches[0].patch_id];
+      // Framing a box selects ALL candidate patches inside it (capped at
+      // maxPatchSelection); users can still click a tile to drop the ones they
+      // don't want. This matches the intuition "framed 4 → analyse 4".
+      selectedPatchIds = candidatePatches.slice(0, maxPatchSelection).map((patch) => patch.patch_id);
       selectedPatchRegion = currentRegion;
       confirmPatchSelection.disabled = false;
-      patchStatus.textContent = message || `找到 ${candidatePatches.length} 个候选 patch，已默认选择第一个。`;
-      patchList.innerHTML = candidatePatches.map((patch, index) => `
-        <button class="patch-item ${index === 0 ? "active" : ""}" data-patch-id="${escapeHtml(patch.patch_id)}" type="button">
+      const omitted = candidatePatches.length - selectedPatchIds.length;
+      patchStatus.textContent = message || (
+        `找到 ${candidatePatches.length} 个候选 patch，已选中 ${selectedPatchIds.length} 个` +
+        (omitted > 0 ? `（超出上限 ${maxPatchSelection}，另 ${omitted} 个未选）` : "") +
+        "，可点选取消不需要的 patch。"
+      );
+      patchList.innerHTML = candidatePatches.map((patch) => `
+        <button class="patch-item ${selectedPatchIds.includes(patch.patch_id) ? "active" : ""}" data-patch-id="${escapeHtml(patch.patch_id)}" type="button">
           <strong>${escapeHtml(patch.patch_id)}</strong>
           <span>重叠分数：${escapeHtml(String(patch.score ?? "暂无"))}</span>
           <span>月份：${escapeHtml((patch.available_months || []).join(", ") || "暂无")}</span>
           <span>任务：${escapeHtml((patch.available_tasks || []).join(", ") || "实时推理")}</span>
         </button>
       `).join("");
-      candidatePatches.forEach((patch, index) => {
+      candidatePatches.forEach((patch) => {
         const bounds = patch.bounds_wgs84 || [];
         if (bounds.length !== 4) {
           return;
         }
         const layer = L.rectangle([[bounds[1], bounds[0]], [bounds[3], bounds[2]]], {
-          color: index === 0 ? "#2563eb" : "#16a34a",
-          weight: index === 0 ? 3 : 1,
-          fillOpacity: index === 0 ? 0.16 : 0.08
+          color: selectedPatchIds.includes(patch.patch_id) ? "#2563eb" : "#16a34a",
+          weight: selectedPatchIds.includes(patch.patch_id) ? 3 : 1,
+          fillOpacity: selectedPatchIds.includes(patch.patch_id) ? 0.16 : 0.08
         }).addTo(leafletMap);
         layer.bindPopup(`${patch.patch_id}`);
         patchLayers.push(layer);
@@ -1775,17 +1812,29 @@
     }
 
     function selectPatch(patchId) {
-      selectedPatchIds = [patchId];
+      const existing = selectedPatchIds.indexOf(patchId);
+      if (existing >= 0) {
+        selectedPatchIds.splice(existing, 1);
+      } else {
+        if (selectedPatchIds.length >= maxPatchSelection) {
+          patchStatus.textContent = `最多同时选择 ${maxPatchSelection} 个 patch，请先取消一个再选择。`;
+          return;
+        }
+        selectedPatchIds.push(patchId);
+      }
       selectedPatchRegion = currentRegion;
       patchList.querySelectorAll(".patch-item").forEach((item) => {
-        item.classList.toggle("active", item.dataset.patchId === patchId);
+        item.classList.toggle("active", selectedPatchIds.includes(item.dataset.patchId));
       });
       patchLayers.forEach((layer) => {
-        const selected = layer.getPopup()?.getContent() === patchId;
+        const layerPatchId = layer.getPopup()?.getContent();
+        const selected = selectedPatchIds.includes(layerPatchId);
         layer.setStyle({color: selected ? "#2563eb" : "#16a34a", weight: selected ? 3 : 1, fillOpacity: selected ? 0.16 : 0.08});
       });
-      patchStatus.textContent = `已选择 ${patchId}。`;
-      confirmPatchSelection.disabled = false;
+      patchStatus.textContent = selectedPatchIds.length
+        ? `已选择 ${selectedPatchIds.length} 个 patch，可继续调整。`
+        : "尚未选择 patch，请至少选择一个。";
+      confirmPatchSelection.disabled = !selectedPatchIds.length;
     }
 
     function escapeHtml(value) {
@@ -2129,7 +2178,10 @@
       }
       updateMapLabel();
       mapModal.classList.remove("show");
-      addMessage(`已选择 ${escapeHtml(currentRegion)} 的 ${escapeHtml(selectedPatchIds[0])}，后续报告会优先使用这个 patch。`, "agent");
+      const selectionText = selectedPatchIds.length === 1
+        ? escapeHtml(selectedPatchIds[0])
+        : `${selectedPatchIds.length} 个 patch`;
+      addMessage(`已选择 ${escapeHtml(currentRegion)} 的 ${selectionText}，后续报告会按所选范围生成合计结果。`, "agent");
     });
 
     mapModal.addEventListener("click", (event) => {
