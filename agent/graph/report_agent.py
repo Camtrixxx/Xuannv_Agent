@@ -844,6 +844,27 @@ class ReportAgent:
     @staticmethod
     def _used_patch_ids(analysis: Any) -> list[str]:
         payload = getattr(analysis, "aef_payload", {}) or {}
+        used = payload.get("used_patch_ids")
+        if isinstance(used, list) and used:
+            return list(dict.fromkeys(str(item) for item in used if str(item).strip()))
+        patch_results = payload.get("patch_results")
+        if isinstance(patch_results, list):
+            ids = [
+                str(item.get("patch_id"))
+                for item in patch_results
+                if isinstance(item, dict) and item.get("status") == "ok" and item.get("patch_id")
+            ]
+            if ids:
+                return list(dict.fromkeys(ids))
+        patches = payload.get("patches")
+        if isinstance(patches, list):
+            ids = [
+                str(item.get("patch_id"))
+                for item in patches
+                if isinstance(item, dict) and item.get("patch_id")
+            ]
+            if ids:
+                return list(dict.fromkeys(ids))
         patch = payload.get("patch")
         if isinstance(patch, dict) and patch.get("patch_id"):
             return [str(patch["patch_id"])]

@@ -22,6 +22,17 @@ def test_used_patch_ids_from_selected_ids():
     assert ReportAgent._used_patch_ids(analysis) == ["patch_000002"]
 
 
+def test_used_patch_ids_prefers_successful_multi_patch_results():
+    analysis = SimpleNamespace(
+        aef_payload={
+            "requested_patch_ids": ["p1", "p2"],
+            "used_patch_ids": ["p1", "p2"],
+            "failed_patch_ids": ["p3"],
+        }
+    )
+    assert ReportAgent._used_patch_ids(analysis) == ["p1", "p2"]
+
+
 def test_used_patch_ids_empty():
     assert ReportAgent._used_patch_ids(SimpleNamespace(aef_payload={})) == []
 
