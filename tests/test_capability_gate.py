@@ -170,3 +170,19 @@ def test_resume_after_failed_training(tmp_path):
     assert "没有成功" in r.message or "没成功" in r.message
     # Still pending (retry not yet done).
     assert r.memory["pending_custom_model"]["class_name"] == "机场"
+
+
+def test_native_task_abandons_pending_custom_model(tmp_path):
+    # Turn 1: 湿地 → pending annotation. Turn 2: the user drops it and asks for a
+    # native, built-in task (道路提取) instead. We must abandon the pending 湿地
+    # and let the ordinary path run — not stay stuck re-offering annotation.
+    caps = {"湿地": Capability(kind=NEEDS_ANNOTATION, class_name="湿地")}
+    agent = _agent(tmp_path, caps)
+    r1 = agent.run(_req("今年二月份湿地", "sn1", aoi=AOI))
+    assert r1.status == AgentStatus.NEEDS_ANNOTATION
+    assert r1.memory["pending_custom_model"]["class_name"] == "湿地"
+
+    r2 = agent.run(_req("今年二月份道路提取", "sn1", aoi=AOI))
+    assert r2.status != AgentStatus.NEEDS_ANNOTATION
+    assert not r2.action
+    assert r2.memory.get("pending_custom_model") in (None, {})

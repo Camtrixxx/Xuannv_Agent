@@ -30,7 +30,7 @@ from agent.services.change_monitor_service import ChangeMonitorService
 from agent.services.pressure_score_service import PressureScoreService
 from agent.services.capability_service import CapabilityService, NEEDS_ANNOTATION as CAP_NEEDS_ANNOTATION, CUSTOM_READY, CUSTOM_TRAINING, CUSTOM_FAILED
 from agent.services.report_service import ReportService
-from agent.taxonomy import non_native_object
+from agent.taxonomy import native_object, non_native_object
 
 try:
     from langgraph.graph import END, StateGraph
@@ -469,10 +469,21 @@ class ReportAgent:
         pending = memory.get("pending_custom_model") or {}
         class_name = pending.get("class_name") or ""
         region = pending.get("region") or intent.region
-        # If this turn names a *different* non-native object, abandon the old
-        # pending task and let the gate handle the new one.
+        # The user may have moved on from the pending custom object. Abandon it
+        # and fall through to normal handling when this turn either:
+        #   - names a *different* non-native object (the gate re-offers it), or
+        #   - clearly asks for a native, built-in task/object (道路提取, …) and
+        #     no longer mentions the pending object. Otherwise "是道路提取" stays
+        #     wrongly stuck re-offering "湿地".
+        prompt = intent.user_prompt or ""
         new_obj = self._detect_target_object(intent)
-        if new_obj and non_native_object(class_name) and new_obj != non_native_object(class_name):
+        pending_obj = non_native_object(class_name)
+        if new_obj and pending_obj and new_obj != pending_obj:
+            self.memory_service.clear_pending_custom_model(state["request"].session_id)
+            return None
+        if not new_obj and (intent.task or native_object(prompt)) and (
+            not pending_obj or pending_obj not in prompt
+        ):
             self.memory_service.clear_pending_custom_model(state["request"].session_id)
             return None
 
