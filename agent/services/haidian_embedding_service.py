@@ -125,14 +125,6 @@ class HaidianEmbeddingAnalysisService:
             rejected = ", ".join(rejected_patch_ids) or "所选范围"
             raise RuntimeError(f"海淀专题结果获取失败：{rejected}，请更换 patch 或月份后重试。")
 
-        embedding_asset: Path | None = None
-        try:
-            first_patch_id = str(result_assets[0][0].get("patch_id") or "")
-            embedding_asset = self._download_remote_asset(
-                self._embedding_url(first_patch_id, month), request, task_id, "embedding"
-            )
-        except Exception:
-            embedding_asset = None
         task_summary = self._get_json_optional(f"/regions/haidian/tasks/{task_id}/summary?version=v1")
         image_stats = self._aggregate_image_stats(task_id, [stats for _, _, stats in result_assets])
         task_display = TASK_DISPLAY.get(task_id, request.task)
@@ -173,14 +165,6 @@ class HaidianEmbeddingAnalysisService:
                     overlay=len(bounds) == 4,
                     patch_id=patch_id,
                 ))
-        if embedding_asset is not None:
-            charts.append(ChartAsset(
-                title="Embedding 可视化预览",
-                kind="image",
-                url=self._asset_url(embedding_asset),
-                caption=f"代表性 patch（{used_patch_ids[0]}）的 embedding RGB 预览图。",
-                patch_id=used_patch_ids[0],
-            ))
         status_text = f"成功处理 {len(used_patch_ids)} 个 patch"
         if rejected_patch_ids:
             status_text += f"，{len(rejected_patch_ids)} 个 patch 获取失败"
@@ -209,7 +193,7 @@ class HaidianEmbeddingAnalysisService:
                     "title": "专题结果",
                     "text": (
                         f"本次报告直接调用海淀在线专题结果接口，获得 {len(used_patch_ids)} 张 {task_display} PNG 结果图，"
-                        "并按 patch 面积汇总指标；embedding 预览图仅展示代表性 patch。"
+                        "并按 patch 面积汇总指标。"
                     ),
                 },
             ],
@@ -226,7 +210,7 @@ class HaidianEmbeddingAnalysisService:
                 "多 patch 结果按 UTM 网格拼接为一张连续图；非相邻选区之间的空缺保持透明，不做插值填充。",
             ],
             confidence_notes=[
-                "专题结果图来自在线海淀 embedding-api；embedding 服务可用时附带代表性 patch 预览。",
+                "专题结果图来自在线海淀 embedding-api 的 patch 专题结果接口。",
                 "报告中的图像统计为 Agent 从 PNG 结果图中提取的轻量指标，正式业务评估仍需接入标签或评估接口。",
             ],
             data_table=image_stats.get("class_distribution") or [],
@@ -376,10 +360,6 @@ class HaidianEmbeddingAnalysisService:
             return False
         tasks = patch.get("available_tasks") or []
         return not tasks or task_id in tasks
-
-    def _embedding_url(self, patch_id: str, month: str) -> str:
-        query = urlencode({"format": "png", "version": "v1", "month": month})
-        return f"/regions/haidian/patches/{patch_id}/embedding?{query}"
 
     def _task_result_url(self, patch_id: str, task_id: str, month: str) -> str:
         query = urlencode({"format": "png", "version": "v1", "month": month})
