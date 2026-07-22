@@ -111,9 +111,13 @@ class EmbeddingAPIConfig:
     version: str = field(default_factory=lambda: os.getenv("AGENT_HARBIN_EMBEDDING_VERSION", "v2"))
     sample_count: int = field(default_factory=lambda: _get_int("AGENT_HARBIN_SAMPLE_COUNT", 1))
     # Maximum number of explicitly selected or AOI-matched patches used by a
-    # regional report. This keeps a map selection from producing an unbounded
-    # number of remote requests and report layers.
-    max_selected_patches: int = field(default_factory=lambda: max(1, _get_int("AGENT_MAX_SELECTED_PATCHES", 8)))
+    # regional report. A large framed selection is honoured; this is only a
+    # protective ceiling against a runaway number of serial remote requests.
+    # Set AGENT_MAX_SELECTED_PATCHES=0 (or negative) for no cap at all.
+    max_selected_patches: int = field(default_factory=lambda: _get_int("AGENT_MAX_SELECTED_PATCHES", 64))
+    # Ceiling on how many candidate patches the map-selection search returns.
+    # 0 or negative means "return every patch inside the framed box".
+    patch_search_limit: int = field(default_factory=lambda: _get_int("AGENT_PATCH_SEARCH_LIMIT", 0))
 
 
 @dataclass(slots=True)

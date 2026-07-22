@@ -257,7 +257,10 @@ class HaidianEmbeddingAnalysisService:
     def _select_patches(
         self, request: ReportRequest, task_id: str, month: str
     ) -> tuple[list[dict[str, Any]], list[str], list[str]]:
-        limit = max(1, int(self.config.max_selected_patches))
+        # max_selected_patches <= 0 means "no cap" — honour the whole selection
+        # (both an explicit patch list and an AOI/global search).
+        configured = int(self.config.max_selected_patches)
+        limit = configured if configured > 0 else 1_000_000
         if request.selected_patch_ids:
             unique_ids = list(dict.fromkeys(str(item) for item in request.selected_patch_ids if str(item).strip()))
             selected: list[dict[str, Any]] = []

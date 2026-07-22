@@ -1304,7 +1304,9 @@
     let selectStartLatLng = null;
     let selectedAoi = null;
     let selectedPatchIds = [];
-    const maxPatchSelection = 8;
+    // 0 = no cap: a framed box selects every patch inside it. Kept as a guard
+    // knob only; the backend applies its own protective ceiling if configured.
+    const maxPatchSelection = 0;
     let selectedPatchRegion = "";
     let candidatePatches = [];
     let patchSearchController = null;
@@ -1747,7 +1749,7 @@
             task: currentTask,
             time_range: extractTimeRangeFromPrompt(document.getElementById("prompt").value),
             bbox: normalizedBbox,
-            limit: 12
+            limit: 0
           })
         });
         const payload = await response.json();
@@ -1776,10 +1778,14 @@
         patchStatus.textContent = message || "当前范围没有找到可用 patch。";
         return;
       }
-      // Framing a box selects ALL candidate patches inside it (capped at
-      // maxPatchSelection); users can still click a tile to drop the ones they
-      // don't want. This matches the intuition "framed 4 → analyse 4".
-      selectedPatchIds = candidatePatches.slice(0, maxPatchSelection).map((patch) => patch.patch_id);
+      // Framing a box selects ALL candidate patches inside it; users can still
+      // click a tile to drop the ones they don't want. maxPatchSelection <= 0
+      // means no cap ("framed 40 → analyse 40"); a positive value trims the
+      // extras. This matches the intuition "framed N → analyse N".
+      const capped = maxPatchSelection > 0
+        ? candidatePatches.slice(0, maxPatchSelection)
+        : candidatePatches;
+      selectedPatchIds = capped.map((patch) => patch.patch_id);
       selectedPatchRegion = currentRegion;
       confirmPatchSelection.disabled = false;
       const omitted = candidatePatches.length - selectedPatchIds.length;
@@ -1816,7 +1822,7 @@
       if (existing >= 0) {
         selectedPatchIds.splice(existing, 1);
       } else {
-        if (selectedPatchIds.length >= maxPatchSelection) {
+        if (maxPatchSelection > 0 && selectedPatchIds.length >= maxPatchSelection) {
           patchStatus.textContent = `最多同时选择 ${maxPatchSelection} 个 patch，请先取消一个再选择。`;
           return;
         }

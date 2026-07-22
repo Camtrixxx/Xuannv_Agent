@@ -62,7 +62,7 @@ class PatchSelectionService:
                 selected_patch_ids=[],
                 message=str(exc),
             )
-        limit = self._parse_limit(payload.get("limit"), default=12)
+        limit = self._parse_limit(payload.get("limit"))
 
         if region_id not in {"yajiang", "harbin", "haidian"}:
             return PatchSearchResult(
@@ -118,7 +118,7 @@ class PatchSelectionService:
             time_range=time_range,
             bbox=bbox,
             patches=patches,
-            selected_patch_ids=[str(item["patch_id"]) for item in patches[: max(1, min(limit, len(patches)))]],
+            selected_patch_ids=[str(item["patch_id"]) for item in patches],
             message=message,
         )
 
@@ -169,7 +169,7 @@ class PatchSelectionService:
             page += 1
 
         rows.sort(key=lambda item: (item.get("score", 0), item.get("patch_id", "")), reverse=True)
-        return rows[:limit]
+        return rows if limit <= 0 else rows[:limit]
 
     def _search_yajiang(
         self,
@@ -255,9 +255,14 @@ class PatchSelectionService:
             raise ValueError("框选范围太小或方向无效，请拖动出一个矩形范围。")
         return bbox
 
-    def _parse_limit(self, raw: Any, default: int) -> int:
+    def _parse_limit(self, raw: Any) -> int:
+        """Resolve the candidate cap. 0/negative (request or config) = no cap.
+
+        A framed box should return every patch inside it, so there is no hard
+        ceiling here anymore; the frontend passes 0 to ask for all of them.
+        """
         try:
             value = int(raw)
         except (TypeError, ValueError):
-            value = default
-        return max(1, min(value, 50))
+            value = int(getattr(self.config, "patch_search_limit", 0) or 0)
+        return value if value > 0 else 0

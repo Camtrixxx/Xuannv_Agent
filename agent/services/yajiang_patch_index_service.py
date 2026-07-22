@@ -90,7 +90,7 @@ class YajiangPatchIndexService:
             item["task_available"] = True
             rows.append(item)
         rows.sort(key=lambda item: (item.get("score", 0), item.get("patch_id", "")), reverse=True)
-        return rows[:limit]
+        return rows if limit <= 0 else rows[:limit]
 
     @property
     def patches(self) -> list[dict[str, Any]]:
