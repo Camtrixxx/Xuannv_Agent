@@ -12,9 +12,13 @@ so both HaidianEmbeddingAnalysisService and ChangeMonitorService can share it.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
+from typing import Any
 
 from PIL import Image
+
+from agent.schemas.report import ChartAsset
 
 
 def stitch_tiles(
@@ -85,3 +89,81 @@ def stitch_tiles(
     except OSError:
         return None
     return out_path
+
+
+def _union_wgs84(bounds_list: list[Any]) -> list[float] | None:
+    """Bounding box that contains every valid ``[lon,lat,lon,lat]`` in the list."""
+    valid = [
+        [float(v) for v in item[:4]]
+        for item in bounds_list
+        if isinstance(item, list) and len(item) == 4
+    ]
+    if not valid:
+        return None
+    return [
+        min(item[0] for item in valid),
+        min(item[1] for item in valid),
+        max(item[2] for item in valid),
+        max(item[3] for item in valid),
+    ]
+
+
+def build_mosaic_overlay(
+    tiles: list[dict[str, Any]],
+    asset_dir: Path,
+    *,
+    stem: str,
+    fingerprint: str,
+    merged_title: str,
+    merged_caption: str,
+    per_patch_title: str,
+    per_patch_caption: str,
+) -> list[ChartAsset]:
+    """Merge per-patch result PNGs into ONE mosaic overlay when possible.
+
+    ``tiles`` is a list of dicts, each ``{"patch_id", "path" (Path), "bounds_wgs84"
+    [lon,lat,lon,lat], "bounds" (projected [xmin,ymin,xmax,ymax] metres)}``. When
+    every tile carries 4-element projected bounds and there are at least two, they
+    are stitched by their UTM grid into a single seamless layer (one map toggle,
+    one figure) — like the road/building report. Otherwise (single patch, or any
+    tile missing/mismatched bounds) it falls back to one overlay per patch.
+
+    Returns a list of ``ChartAsset`` (``overlay=True``); empty when ``tiles`` is
+    empty. ``stem``/``fingerprint`` name the merged PNG deterministically so an
+    identical selection reuses the same file. Titles/captions are supplied by the
+    caller so each scenario can describe its own theme.
+    """
+    if not tiles:
+        return []
+    used_ids = [t["patch_id"] for t in tiles]
+    stitchable = [(t["bounds"], t["path"]) for t in tiles if len(t.get("bounds") or []) == 4]
+    if len(stitchable) == len(tiles) and len(tiles) > 1:
+        union = _union_wgs84([t["bounds_wgs84"] for t in tiles])
+        digest = hashlib.sha1(f"{fingerprint}:{sorted(used_ids)}".encode("utf-8")).hexdigest()[:12]
+        out_path = asset_dir / f"{stem}_{digest}.png"
+        mosaic = stitch_tiles(stitchable, out_path)
+        if mosaic is not None and union is not None:
+            return [
+                ChartAsset(
+                    title=merged_title.format(n=len(used_ids)),
+                    kind="image",
+                    url=f"/reports/assets/{mosaic.name}",
+                    caption=merged_caption.format(n=len(used_ids)),
+                    bounds_wgs84=[float(v) for v in union][:4],
+                    overlay=True,
+                    patch_id=",".join(used_ids),
+                )
+            ]
+    # Fallback: one overlay per patch (single patch, or stitching bailed).
+    return [
+        ChartAsset(
+            title=per_patch_title.format(patch_id=t["patch_id"]),
+            kind="image",
+            url=f"/reports/assets/{t['path'].name}",
+            caption=per_patch_caption,
+            bounds_wgs84=t["bounds_wgs84"],
+            overlay=True,
+            patch_id=t["patch_id"],
+        )
+        for t in tiles
+    ]

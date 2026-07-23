@@ -11,8 +11,11 @@ Model accuracy is upstream; we report the model's output faithfully.
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 from typing import Any
+
+from PIL import Image
 
 from agent.config import EmbeddingAPIConfig, ReportConfig
 from agent.schemas.report import AnalysisResult, ChartAsset, MetricCard, ReportRequest
@@ -22,6 +25,7 @@ from agent.services.patch_selection_service import PatchSelectionService
 from agent.services.satellite_basemap import basemap_chart
 from agent.tools.aoi import aggregate_binary_coverage, aggregate_class_distribution
 from agent.tools.classmap import class_distribution, normalize_legend
+from agent.tools.mosaic import build_mosaic_overlay
 from agent.tools.raster import binary_coverage
 
 # The checkup bundle: reliable binary coverages, in report order.
@@ -62,7 +66,8 @@ class RegionCheckupService:
         land_cover = self._land_cover_distribution(region_id, month, patches)
         total_ha = next((c["total_area_ha"] for c in coverages.values() if c.get("total_area_ha")), 0.0)
         patch_count = next((c["patch_count"] for c in coverages.values()), len(patches))
-        return self._build_result(request, month, patch_count, total_ha, coverages, land_cover)
+        overlays = self._land_cover_overlays(region_id, month, patches)
+        return self._build_result(request, month, patch_count, total_ha, coverages, land_cover, overlays)
 
     def _resolve_patches(self, region_id: str, month: str, bbox: list[float]) -> list[dict[str, Any]]:
         # Any binary task shares the same patch grid; use one to enumerate the AOI.
@@ -113,6 +118,61 @@ class RegionCheckupService:
                 per_patch.append(dist)
         return aggregate_class_distribution(per_patch)
 
+    def _land_cover_overlays(
+        self, region_id: str, month: str, patches: list[dict[str, Any]]
+    ) -> list[ChartAsset]:
+        """Stitch per-patch land-cover result PNGs into ONE map overlay.
+
+        Land cover is the most information-dense single theme, so we place just
+        that one coloured layer on the map (one toggle, one figure). Patches
+        whose result PNG or WGS84 bounds are missing are left off the map.
+        """
+        tiles: list[dict[str, Any]] = []
+        for patch in patches:
+            tile = self._render_land_cover_tile(region_id, patch, month)
+            if tile is not None:
+                tiles.append(tile)
+        return build_mosaic_overlay(
+            tiles,
+            self.asset_dir,
+            stem="haidian_checkup_landcover_mosaic",
+            fingerprint=f"checkup_landcover:{month}",
+            merged_title="土地覆盖分类（{n} patch 拼接）",
+            merged_caption=(
+                "片区土地覆盖分类彩色结果，已按 UTM 网格将 {n} 个 patch 拼接为一张连续图，"
+                "叠加在卫星底图上。"
+            ),
+            per_patch_title="土地覆盖分类 · {patch_id}",
+            per_patch_caption="片区土地覆盖分类彩色结果。",
+        )
+
+    def _render_land_cover_tile(
+        self, region_id: str, patch: dict[str, Any], month: str
+    ) -> dict[str, Any] | None:
+        bounds_wgs84 = [float(v) for v in (patch.get("bounds_wgs84") or [])][:4]
+        if len(bounds_wgs84) != 4:
+            return None
+        patch_id = str(patch.get("patch_id") or "")
+        if not patch_id:
+            return None
+        arr = self.aoi_cover.fetch_result_array(region_id, patch_id, LAND_COVER_TASK, month)
+        if arr is None:
+            return None
+        digest = hashlib.sha1(f"{patch_id}:{LAND_COVER_TASK}:{month}".encode("utf-8")).hexdigest()[:12]
+        out_path = self.asset_dir / f"haidian_checkup_landcover_{patch_id}_{digest}.png"
+        try:
+            Image.fromarray(arr).convert("RGBA").save(out_path)
+        except (OSError, ValueError):
+            return None
+        bounds_proj = patch.get("bounds") or []
+        bounds_proj = [float(v) for v in bounds_proj][:4] if len(bounds_proj) == 4 else []
+        return {
+            "patch_id": patch_id,
+            "path": out_path,
+            "bounds_wgs84": bounds_wgs84,
+            "bounds": bounds_proj,
+        }
+
     def _legend(self, region_id: str, task_id: str) -> list[dict[str, Any]]:
         if task_id not in self._legend_cache:
             from urllib.parse import urlencode
@@ -130,6 +190,7 @@ class RegionCheckupService:
         total_ha: float,
         coverages: dict[str, dict[str, Any]],
         land_cover: list[dict[str, Any]],
+        overlays: list[ChartAsset] | None = None,
     ) -> AnalysisResult:
         region = "北京市海淀区"
         tr = request.time_range
@@ -193,7 +254,7 @@ class RegionCheckupService:
                 "total_area_ha": round(total_ha, 2),
                 "coverages": coverages,
             },
-            charts=[basemap] if basemap else [],
+            charts=([basemap] if basemap else []) + list(overlays or []),
             data_table=land_cover,
             data_table_title="土地覆盖各类别占比（片区聚合）" if land_cover else "",
         )

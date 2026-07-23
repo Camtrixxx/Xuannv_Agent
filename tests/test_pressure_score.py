@@ -76,6 +76,45 @@ def test_score_ranks_high_impervious_low_green_first(monkeypatch):
     assert res.data_table[0]["label"].startswith("#1")
 
 
+def test_score_merges_patches_into_one_heatmap(monkeypatch, tmp_path):
+    # Two adjacent tiles (north/south) with band colours → one stitched overlay.
+    south = [435014.236, 4415283.021, 436294.236, 4416563.021]
+    north = [435014.236, 4416563.021, 436294.236, 4417843.021]
+    swgs = [116.20, 39.88, 116.26, 39.90]
+    nwgs = [116.20, 39.90, 116.26, 39.92]
+    patches = [
+        {"patch_id": "hi", "bounds": south, "bounds_wgs84": swgs},
+        {"patch_id": "lo", "bounds": north, "bounds_wgs84": nwgs},
+    ]
+    building = {"hi": _colors(2000, 8000, RED), "lo": _colors(9000, 1000, RED)}
+    landcover = {"hi": _colors(9500, 500, GREEN), "lo": _colors(2000, 8000, GREEN)}
+    svc = _svc(monkeypatch, patches, building, landcover)
+    svc.asset_dir = tmp_path
+    res = svc.analyze(_req())
+
+    overlays = [c for c in res.charts if getattr(c, "overlay", False)]
+    assert len(overlays) == 1
+    mosaic = overlays[0]
+    assert mosaic.patch_id == "hi,lo"
+    assert mosaic.bounds_wgs84 == [116.20, 39.88, 116.26, 39.92]
+    assert (tmp_path / mosaic.url.rsplit("/", 1)[-1]).exists()
+
+
+def test_score_single_patch_overlay(monkeypatch, tmp_path):
+    wgs = [116.20, 39.88, 116.26, 39.92]
+    patches = [{"patch_id": "p1", "bounds": BOUNDS, "bounds_wgs84": wgs}]
+    building = {"p1": _colors(2000, 8000, RED)}
+    landcover = {"p1": _colors(9500, 500, GREEN)}
+    svc = _svc(monkeypatch, patches, building, landcover)
+    svc.asset_dir = tmp_path
+    res = svc.analyze(_req())
+
+    overlays = [c for c in res.charts if getattr(c, "overlay", False)]
+    assert len(overlays) == 1
+    assert overlays[0].bounds_wgs84 == wgs
+    assert (tmp_path / overlays[0].url.rsplit("/", 1)[-1]).exists()
+
+
 def test_score_requires_aoi(monkeypatch):
     svc = PressureScoreService()
     with pytest.raises(RuntimeError, match="AOI|框选"):

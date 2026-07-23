@@ -62,6 +62,8 @@ def _checkup_with_stubs(monkeypatch, patches, colors_by_task, legend):
             yield p, counts
 
     monkeypatch.setattr(svc.aoi_cover, "iter_patch_colors", fake_iter)
+    # Land-cover map overlay pulls result arrays; default to none (no network).
+    monkeypatch.setattr(svc.aoi_cover, "fetch_result_array", lambda *a, **k: None)
     return svc
 
 
@@ -85,6 +87,37 @@ def test_checkup_aggregates_metrics_and_table(monkeypatch):
     assert res.data_table_title.startswith("土地覆盖")
     assert res.data_table[0]["label"] == "建成区"
     assert res.aef_payload["scenario"] == "checkup"
+
+
+def test_checkup_merges_land_cover_into_one_overlay(monkeypatch, tmp_path):
+    import numpy as np
+
+    # Two adjacent tiles → land-cover PNGs stitch into ONE map overlay.
+    south = [435014.236, 4415283.021, 436294.236, 4416563.021]
+    north = [435014.236, 4416563.021, 436294.236, 4417843.021]
+    patches = [
+        {"patch_id": "p1", "bounds": south, "bounds_wgs84": [116.20, 39.88, 116.26, 39.90]},
+        {"patch_id": "p2", "bounds": north, "bounds_wgs84": [116.20, 39.90, 116.26, 39.92]},
+    ]
+    colors = {
+        "building_extraction": [(16384, (255, 255, 255))],
+        "road_extraction": [(16384, (255, 255, 255))],
+        "water_extraction": [(16384, (0, 0, 0))],
+        "construction": [(16384, (0, 0, 0))],
+        "land_cover_classification": [(16384, (190, 170, 130))],
+    }
+    legend = [{"id": "lc5", "name": "建成区", "rgb": (190, 170, 130)}]
+    svc = _checkup_with_stubs(monkeypatch, patches, colors, legend)
+    svc.asset_dir = tmp_path
+    lc = np.full((128, 128, 3), (190, 170, 130), dtype=np.uint8)
+    monkeypatch.setattr(svc.aoi_cover, "fetch_result_array", lambda *a, **k: lc)
+    res = svc.analyze(ReportRequest(task="片区综合体检", region="北京市海淀区", prompt="体检", time_range="2025-12", aoi=AOI))
+
+    overlays = [c for c in res.charts if getattr(c, "overlay", False)]
+    assert len(overlays) == 1
+    assert overlays[0].patch_id == "p1,p2"
+    assert overlays[0].bounds_wgs84 == [116.20, 39.88, 116.26, 39.92]
+    assert (tmp_path / overlays[0].url.rsplit("/", 1)[-1]).exists()
 
 
 def test_checkup_requires_aoi(monkeypatch):

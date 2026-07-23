@@ -13,14 +13,20 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+import hashlib
+
+import numpy as np
+from PIL import Image
+
 from agent.config import EmbeddingAPIConfig, ReportConfig
-from agent.schemas.report import AnalysisResult, MetricCard, ReportRequest
+from agent.schemas.report import AnalysisResult, ChartAsset, MetricCard, ReportRequest
 from agent.services.aoi_cover_service import AoiCoverService
 from agent.services.patch_selection_service import PatchSelectionService
 from agent.services.satellite_basemap import basemap_chart
 from agent.tools.classmap import class_distribution, normalize_legend
+from agent.tools.mosaic import build_mosaic_overlay
 from agent.tools.raster import area_ha_from_bounds, binary_coverage
-from agent.tools.scoring import pressure_score, rank_patches, summarize_scores
+from agent.tools.scoring import band_rgba, pressure_score, rank_patches, summarize_scores
 
 BUILDING_TASK = "building_extraction"
 LAND_COVER_TASK = "land_cover_classification"
@@ -64,7 +70,8 @@ class PressureScoreService:
 
         summary = summarize_scores(scored)
         ranked = rank_patches(scored, top_n=TOP_N)
-        return self._build_result(request, month, summary, ranked)
+        overlays = self._score_overlays(scored, month)
+        return self._build_result(request, month, summary, ranked, overlays)
 
     def _resolve_patches(self, region_id: str, month: str, bbox: list[float]) -> list[dict[str, Any]]:
         search = self.patch_selection.search(
@@ -128,13 +135,64 @@ class PressureScoreService:
                 {
                     "patch_id": patch_id,
                     "bounds": patch.get("bounds"),
+                    "bounds_wgs84": patch.get("bounds_wgs84"),
                     **score,
                     "area_ha": total_ha,
                 }
             )
         return scored
 
-    def _build_result(self, request, month, summary, ranked) -> AnalysisResult:
+    def _score_overlays(self, scored: list[dict[str, Any]], month: str) -> list[ChartAsset]:
+        """Render each patch as a solid band-colour tile, stitch into one heatmap.
+
+        High=red / medium=orange / low=green, semi-transparent so the satellite
+        basemap reads through. Patches missing WGS84 bounds are left off the map.
+        """
+        tiles: list[dict[str, Any]] = []
+        for row in scored:
+            tile = self._render_band_tile(row, month)
+            if tile is not None:
+                tiles.append(tile)
+        return build_mosaic_overlay(
+            tiles,
+            self.asset_dir,
+            stem="haidian_score_mosaic",
+            fingerprint=f"score:{month}",
+            merged_title="补绿压力热力图（{n} patch 拼接）",
+            merged_caption=(
+                "红=高压（补绿最优先）、橙=中压、绿=低压，按 UTM 网格将 {n} 个 patch "
+                "拼接为一张连续图，叠加在卫星底图上。"
+            ),
+            per_patch_title="补绿压力 · {patch_id}",
+            per_patch_caption="红=高压（补绿最优先）、橙=中压、绿=低压。",
+        )
+
+    def _render_band_tile(self, row: dict[str, Any], month: str) -> dict[str, Any] | None:
+        bounds_wgs84 = [float(v) for v in (row.get("bounds_wgs84") or [])][:4]
+        if len(bounds_wgs84) != 4:
+            return None
+        patch_id = str(row.get("patch_id") or "")
+        colour = band_rgba(str(row.get("band") or ""))
+        # A small solid tile is enough — the map georeferences it to patch bounds;
+        # the mosaic paste scales tiles by shared pixels-per-metre, so equal sizes.
+        rgba = np.zeros((128, 128, 4), dtype=np.uint8)
+        rgba[:, :] = colour
+        digest = hashlib.sha1(f"{patch_id}:{month}:{row.get('band')}".encode("utf-8")).hexdigest()[:12]
+        out_path = self.asset_dir / f"haidian_score_{patch_id}_{digest}.png"
+        try:
+            Image.fromarray(rgba, mode="RGBA").save(out_path)
+        except (OSError, ValueError):
+            return None
+        bounds_proj = row.get("bounds") or []
+        bounds_proj = [float(v) for v in bounds_proj][:4] if len(bounds_proj) == 4 else []
+        return {
+            "patch_id": patch_id,
+            "path": out_path,
+            "bounds_wgs84": bounds_wgs84,
+            "bounds": bounds_proj,
+        }
+
+    def _build_result(self, request, month, summary, ranked, overlays=None) -> AnalysisResult:
         region = "北京市海淀区"
         tr = request.time_range
         mean = summary["mean_score"]
@@ -199,7 +257,7 @@ class PressureScoreService:
                     for r in ranked
                 ],
             },
-            charts=[basemap] if basemap else [],
+            charts=([basemap] if basemap else []) + list(overlays or []),
             data_table=table,
             data_table_title="补绿优先区 TOP（压力分）" if table else "",
         )

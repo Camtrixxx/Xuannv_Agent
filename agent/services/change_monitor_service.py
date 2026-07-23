@@ -22,7 +22,7 @@ from agent.services.haidian_embedding_service import TASK_DISPLAY, TASK_TO_HAIDI
 from agent.services.model_registry_service import ModelRegistryService
 from agent.services.patch_selection_service import PatchSelectionService
 from agent.services.satellite_basemap import basemap_chart
-from agent.tools.mosaic import stitch_tiles
+from agent.tools.mosaic import build_mosaic_overlay
 from agent.tools.change import (
     aggregate_change,
     binary_change,
@@ -203,61 +203,19 @@ class ChangeMonitorService:
         the body carries one figure. Falls back to per-patch overlays only when
         stitching can't run (single patch, or missing/mismatched bounds).
         """
-        if not tiles:
-            return []
-        used_ids = [t["patch_id"] for t in tiles]
-        stitchable = [(t["bounds"], t["path"]) for t in tiles if len(t.get("bounds") or []) == 4]
-        if len(stitchable) == len(tiles) and len(tiles) > 1:
-            union = self._union_wgs84([t["bounds_wgs84"] for t in tiles])
-            digest = hashlib.sha1(
-                f"{task_id}:{before}:{after}:{sorted(used_ids)}".encode("utf-8")
-            ).hexdigest()[:12]
-            out_path = self.asset_dir / f"haidian_change_mosaic_{task_id}_{digest}.png"
-            mosaic = stitch_tiles(stitchable, out_path)
-            if mosaic is not None and union is not None:
-                return [
-                    ChartAsset(
-                        title=f"变化专题（{len(used_ids)} patch 拼接）",
-                        kind="image",
-                        url=f"/reports/assets/{mosaic.name}",
-                        caption=(
-                            f"红色为新增、蓝色为减少的目标区域（两期逐像素差），"
-                            f"已按 UTM 网格将 {len(used_ids)} 个 patch 拼接为一张连续图。"
-                        ),
-                        bounds_wgs84=[float(v) for v in union][:4],
-                        overlay=True,
-                        patch_id=",".join(used_ids),
-                    )
-                ]
-        # Fallback: one overlay per patch (single patch, or stitching bailed).
-        return [
-            ChartAsset(
-                title=f"变化专题 · {t['patch_id']}",
-                kind="image",
-                url=f"/reports/assets/{t['path'].name}",
-                caption="红色为新增、蓝色为减少的目标区域（两期逐像素差）。",
-                bounds_wgs84=t["bounds_wgs84"],
-                overlay=True,
-                patch_id=t["patch_id"],
-            )
-            for t in tiles
-        ]
-
-    @staticmethod
-    def _union_wgs84(bounds_list) -> list[float] | None:
-        valid = [
-            [float(v) for v in item[:4]]
-            for item in bounds_list
-            if isinstance(item, list) and len(item) == 4
-        ]
-        if not valid:
-            return None
-        return [
-            min(item[0] for item in valid),
-            min(item[1] for item in valid),
-            max(item[2] for item in valid),
-            max(item[3] for item in valid),
-        ]
+        return build_mosaic_overlay(
+            tiles,
+            self.asset_dir,
+            stem=f"haidian_change_mosaic_{task_id}",
+            fingerprint=f"{task_id}:{before}:{after}",
+            merged_title="变化专题（{n} patch 拼接）",
+            merged_caption=(
+                "红色为新增、蓝色为减少的目标区域（两期逐像素差），"
+                "已按 UTM 网格将 {n} 个 patch 拼接为一张连续图。"
+            ),
+            per_patch_title="变化专题 · {patch_id}",
+            per_patch_caption="红色为新增、蓝色为减少的目标区域（两期逐像素差）。",
+        )
 
     def _build_result(self, request, task_id, before, after, agg, rows, model_id="", custom_class="", model_info=None, overlays=None) -> AnalysisResult:
         region = "北京市海淀区"

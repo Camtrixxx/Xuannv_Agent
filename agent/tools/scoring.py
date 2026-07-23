@@ -26,6 +26,15 @@ WEIGHT_GREEN_DEFICIT = 0.5
 BAND_HIGH = 67.0
 BAND_MEDIUM = 34.0
 
+# Semi-transparent fill colours per band for the on-map heatmap overlay: high
+# pressure (补绿最优先) red, medium orange, low green. Alpha keeps the satellite
+# basemap readable underneath.
+BAND_RGBA = {
+    "高压": (220, 38, 38, 150),
+    "中压": (245, 158, 11, 150),
+    "低压": (34, 197, 94, 130),
+}
+
 
 def _clamp01(x: float) -> float:
     return 0.0 if x < 0 else (1.0 if x > 1 else x)
@@ -50,6 +59,11 @@ def pressure_score(impervious_ratio: float, green_ratio: float) -> dict[str, Any
         "impervious_ratio": round(imp, 4),
         "green_ratio": round(green, 4),
     }
+
+
+def band_rgba(band: str) -> tuple[int, int, int, int]:
+    """Fill colour (RGBA) for a pressure band; transparent for an unknown band."""
+    return BAND_RGBA.get(band, (0, 0, 0, 0))
 
 
 def rank_patches(rows: Iterable[dict[str, Any]], top_n: int = 10) -> list[dict[str, Any]]:
