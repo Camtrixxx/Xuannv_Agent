@@ -42,3 +42,21 @@ def test_has_bbox():
     assert not ReportAgent._has_bbox({})
     assert not ReportAgent._has_bbox({"type": "bbox", "coordinates": [1, 2]})
     assert not ReportAgent._has_bbox({"name": "雅江区域"})
+
+
+def test_detect_target_object_ignores_region_name_substring():
+    # "雅江" must not trip the "江"→河流 non-native alias; a real object still fires.
+    # (The actual stripping lives in taxonomy.non_native_object — this guards the
+    # graph's delegation to it.)
+    assert ReportAgent._detect_target_object(
+        SimpleNamespace(user_prompt="雅江2025年6月的地物分类")
+    ) == ""
+    assert ReportAgent._detect_target_object(
+        SimpleNamespace(user_prompt="雅江的水体分布")
+    ) == ""
+    assert ReportAgent._detect_target_object(
+        SimpleNamespace(user_prompt="帮我在海淀这块地识别一下湿地")
+    ) == "湿地"
+    assert ReportAgent._detect_target_object(
+        SimpleNamespace(user_prompt="看看海淀的河流")
+    ) == "河流"

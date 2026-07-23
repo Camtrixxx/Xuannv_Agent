@@ -147,6 +147,10 @@ class IntentService:
         payload = extract_json_object(text)
         if payload is None:
             return None
+        # Region explicitness is judged deterministically (text alias hit or a
+        # valid frontend selection), not from the LLM's self-report, so it matches
+        # the rule path and the graph can trust it to inherit the session region.
+        region_explicit = self._region_named(request) or request.region in SUPPORTED_REGIONS
         return AgentIntent(
             message_type=str(payload.get("message_type") or "report_request"),
             task=str(payload.get("task") or request.task),
@@ -157,8 +161,19 @@ class IntentService:
             confirmation_fields=list(payload.get("confirmation_fields") or []),
             confidence=float(payload.get("confidence") or 0.0),
             source="deepseek",
-            debug={"llm_status": getattr(self.llm, "last_status", "ok")},
+            debug={
+                "llm_status": getattr(self.llm, "last_status", "ok"),
+                "region_explicit": region_explicit,
+            },
         )
+
+    @staticmethod
+    def _region_named(request: ReportRequest) -> bool:
+        """True if the user's raw text names any region (canonical name or alias)."""
+        text = request.prompt or ""
+        if any(name in text for name in SUPPORTED_REGIONS):
+            return True
+        return any(alias in text for alias in REGION_ALIASES)
 
     def _parse_with_rules(self, request: ReportRequest) -> AgentIntent:
         message_type = MessageType.REPORT_REQUEST
@@ -321,6 +336,10 @@ class IntentService:
             # Ambiguous (e.g. chit-chat, or "报告" with nothing else). Let the LLM
             # decide chat-vs-report when a key is configured; degrade to rules otherwise.
             confidence = 0.5
+        # Was the region explicitly chosen this turn (named in text, or picked in
+        # the frontend dropdown), or just the parser's silent 雅江 default? The
+        # graph uses this to decide whether to inherit the session's earlier region.
+        region_explicit = region_in_prompt or request.region in SUPPORTED_REGIONS
         return AgentIntent(
             message_type=message_type,
             task=task,
@@ -329,6 +348,7 @@ class IntentService:
             user_prompt=request.prompt,
             confidence=confidence,
             source="rule",
+            debug={"region_explicit": region_explicit},
         )
 
     def _validate(self, intent: AgentIntent) -> AgentIntent:

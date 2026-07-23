@@ -186,3 +186,79 @@ def test_native_task_abandons_pending_custom_model(tmp_path):
     assert r2.status != AgentStatus.NEEDS_ANNOTATION
     assert not r2.action
     assert r2.memory.get("pending_custom_model") in (None, {})
+
+
+# ------------------------------------------------------- region inheritance
+# The parser silently defaults an unspecified region to 雅江. Across turns, a
+# report request that names no region must keep the session's earlier region
+# instead of snapping back to that default (which would run the wrong region's
+# model). See _merge_memory's region-carry block.
+
+
+def test_region_carries_across_turns_ordinary(tmp_path):
+    # Turn 1 establishes 海淀. Turn 2 names a task + month but NO region and NO
+    # frontend selection → must stay 海淀, not fall back to 雅江.
+    agent = _agent(tmp_path, {})
+    agent.run(_req("分析一下海淀", "sr1"))
+    r = agent.run(_req("就看建筑物，2026年3月", "sr1", region=""))
+    assert r.intent.region == "北京市海淀区"
+    assert r.status == AgentStatus.OK  # slots complete → analysis ran
+
+
+def test_region_carries_when_task_changes(tmp_path):
+    # After a 海淀 building report, "换成道路" (no region) stays in 海淀.
+    agent = _agent(tmp_path, {})
+    agent.run(_req("海淀2026年3月的建筑物提取", "sr2"))
+    r = agent.run(_req("算了，还是看看道路吧", "sr2", region=""))
+    assert r.intent.region == "北京市海淀区"
+    assert r.intent.task == "道路提取"
+
+
+def test_explicit_region_overrides_session(tmp_path):
+    # An explicit new region in a later turn wins over the inherited one.
+    agent = _agent(tmp_path, {})
+    agent.run(_req("海淀2026年3月的建筑物提取", "sr3"))
+    r = agent.run(_req("那看看雅江2025年6月的地物分类", "sr3", region=""))
+    assert r.intent.region == "雅江区域"
+
+
+def test_region_carries_across_scenarios(tmp_path):
+    # Scenario paths (checkup/change/score) must inherit region too, not just the
+    # ordinary path. Turn 1 names 海淀; turn 2 draws an AOI + month for a checkup
+    # with no region word → stays 海淀.
+    agent = _agent(tmp_path, {})
+    agent.run(_req("给海淀做个片区体检", "sr4"))
+    r = agent.run(_req("就这块地，2026年3月", "sr4", region="", aoi=AOI))
+    assert r.intent.region == "北京市海淀区"
+
+
+# ------------------------------------------------------- AOI -> region inference
+# The framed map AOI itself names the region: a box centred in Haidian recovers
+# 海淀 even when the user names no region in text AND there's no prior session
+# region to inherit. (Closes the "框选海淀坐标却问 是雅江吗?" gap.) AOI (the module
+# constant) is centred inside the Haidian footprint.
+
+
+def test_aoi_infers_region_first_turn_no_prior(tmp_path):
+    # First turn, no region word, no session history — the framed AOI alone must
+    # resolve 海淀 instead of the parser's silent 雅江 default.
+    agent = _agent(tmp_path, {})
+    r = agent.run(_req("给这块地做个片区体检，2026年3月", "sa1", region="", aoi=AOI))
+    assert r.intent.region == "北京市海淀区"
+
+
+def test_aoi_region_beats_stale_session_region(tmp_path):
+    # Turn 1 establishes 雅江 (a region with no framed area). Turn 2 frames a
+    # Haidian AOI with no region word → the AOI wins over the inherited 雅江.
+    agent = _agent(tmp_path, {})
+    agent.run(_req("看看雅江的水体分布，2025年9月", "sa2"))
+    r = agent.run(_req("就这块地，2026年3月，做个体检", "sa2", region="", aoi=AOI))
+    assert r.intent.region == "北京市海淀区"
+
+
+def test_explicit_region_word_beats_aoi(tmp_path):
+    # If the user names 雅江 in text, that explicit choice wins even over a
+    # Haidian-centred AOI (the AOI is only a fallback for unspecified regions).
+    agent = _agent(tmp_path, {})
+    r = agent.run(_req("看看雅江的水体分布，2025年9月", "sa3", region="", aoi=AOI))
+    assert r.intent.region == "雅江区域"

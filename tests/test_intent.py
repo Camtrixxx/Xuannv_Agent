@@ -93,6 +93,27 @@ def test_region_alias_normalized():
     assert intent.region == "北京市海淀区"
 
 
+def test_region_explicit_when_named_in_text():
+    # No frontend region, but the text names one → explicit.
+    intent = _intent("海淀2026年3月的建筑物提取", region="")
+    assert intent.debug.get("region_explicit") is True
+
+
+def test_region_explicit_when_frontend_selected():
+    # No region in text, but the frontend passed a valid one → explicit.
+    intent = _intent("看看建筑物", region="北京市海淀区")
+    assert intent.debug.get("region_explicit") is True
+
+
+def test_region_not_explicit_when_defaulted():
+    # Neither text nor frontend named a region → parser's silent 雅江 default,
+    # NOT explicit. This is the signal the graph uses to inherit the session region
+    # instead of snapping back to 雅江.
+    intent = _intent("就看建筑物，2026年3月", region="")
+    assert intent.region == "雅江区域"  # parser default
+    assert intent.debug.get("region_explicit") is False
+
+
 def test_followup_question_detected():
     intent = _intent("详细讲讲基于林地占比80.9%的这个结论")
     assert intent.message_type == MessageType.FOLLOW_UP

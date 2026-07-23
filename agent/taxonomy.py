@@ -48,6 +48,20 @@ REGION_IDS = {
     "haidian": "haidian",
 }
 
+# region id -> geographic bounding box [min_lng, min_lat, max_lng, max_lat] in
+# WGS84. Used to infer a region from a frontend map AOI when the user names no
+# region in text and picks none in the dropdown (see region_from_bbox). Harbin
+# and Haidian are the exact envelopes of their patch footprints, measured live
+# from the embedding API (/regions/{id}/patches, all pages). Yajiang has no
+# remote patch API on this host (local GeoTIFF index, often unbuilt), so its box
+# is an approximate envelope of 雅江县 (川西) — good enough because yajiang is
+# also the fallback default, so a miss there costs nothing.
+REGION_BBOX: dict[str, list[float]] = {
+    "haidian": [116.042476, 39.885118, 116.403321, 40.161672],
+    "harbin": [126.309644, 45.743707, 126.74044, 46.020302],
+    "yajiang": [100.3, 29.0, 101.5, 30.1],
+}
+
 
 # --- Tasks ---------------------------------------------------------------
 
@@ -233,18 +247,35 @@ TRAINING_MODEL_STATUSES = {"training", "running", "pending", "queued"}
 FAILED_MODEL_STATUSES = {"failed", "error"}
 
 
+def _strip_proper_nouns(text: str) -> str:
+    """Remove region names before object matching.
+
+    Object detection is naive substring matching (Chinese has no word
+    boundaries), so a place name can collide with an object alias — e.g. the
+    "江"→河流 alias fires on 雅"江". Region names are proper nouns that can never
+    be the analysis *object*, so stripping them first removes a whole class of
+    false positives without needing a real tokenizer. Longest alias first so a
+    canonical name is removed before its shorter alias leaves a fragment.
+    """
+    t = str(text or "")
+    for alias in sorted(REGION_ALIASES, key=len, reverse=True):
+        t = t.replace(alias, "")
+    return t
+
+
 def native_object(text: str) -> str:
     """Return the native concept a phrase maps to, or "" if not native."""
-    t = str(text or "")
-    for alias, concept in NATIVE_OBJECTS.items():
+    t = _strip_proper_nouns(text)
+    # Longest alias first so a specific term wins over a shorter substring of it.
+    for alias in sorted(NATIVE_OBJECTS, key=len, reverse=True):
         if alias in t:
-            return concept
+            return NATIVE_OBJECTS[alias]
     return ""
 
 
 def non_native_object(text: str) -> str:
     """Return the canonical custom class a phrase names, or "" if none."""
-    t = str(text or "")
+    t = _strip_proper_nouns(text)
     # Prefer the longest alias match so "露天停车场" beats "停车场".
     for alias in sorted(NON_NATIVE_ALIASES, key=len, reverse=True):
         if alias in t:
@@ -264,6 +295,46 @@ def resolve_region_id(region: str) -> str:
     if "雅江" in text or text.lower() == "yajiang":
         return "yajiang"
     return "yajiang"
+
+
+# region id -> canonical user-facing display name (inverse of resolve_region_id).
+REGION_DISPLAY: dict[str, str] = {
+    "yajiang": "雅江区域",
+    "harbin": "哈尔滨新区",
+    "haidian": "北京市海淀区",
+}
+
+
+def region_from_bbox(aoi: object) -> str:
+    """Infer a region's display name from a frontend map AOI, or "" if unclear.
+
+    ``aoi`` is the ``{"type":"bbox","coordinates":[min_lng,min_lat,max_lng,
+    max_lat]}`` a user frames on the map. We return a region only when the AOI's
+    centre falls inside exactly one region's geographic box (REGION_BBOX) — an
+    unambiguous signal that beats the parser's silent 雅江 default. If the centre
+    lands in no box (or, defensively, in more than one), we return "" and let the
+    caller keep whatever region it already had. Centre-in-box (not overlap) is
+    deliberate: a sloppily drawn rectangle that spills past a region's edge still
+    resolves as long as the user aimed at it.
+    """
+    if not (isinstance(aoi, dict) and aoi.get("type") == "bbox"):
+        return ""
+    coords = aoi.get("coordinates")
+    if not (isinstance(coords, list) and len(coords) == 4):
+        return ""
+    try:
+        min_lng, min_lat, max_lng, max_lat = (float(v) for v in coords)
+    except (TypeError, ValueError):
+        return ""
+    cx = (min_lng + max_lng) / 2.0
+    cy = (min_lat + max_lat) / 2.0
+    hits = [
+        rid for rid, (x0, y0, x1, y1) in REGION_BBOX.items()
+        if x0 <= cx <= x1 and y0 <= cy <= y1
+    ]
+    if len(hits) != 1:
+        return ""
+    return REGION_DISPLAY.get(hits[0], "")
 
 
 def normalize_task(region_id: str, task: str) -> str:

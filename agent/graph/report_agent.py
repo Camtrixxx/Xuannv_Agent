@@ -30,7 +30,7 @@ from agent.services.change_monitor_service import ChangeMonitorService
 from agent.services.pressure_score_service import PressureScoreService
 from agent.services.capability_service import CapabilityService, NEEDS_ANNOTATION as CAP_NEEDS_ANNOTATION, CUSTOM_READY, CUSTOM_TRAINING, CUSTOM_FAILED
 from agent.services.report_service import ReportService
-from agent.taxonomy import native_object, non_native_object
+from agent.taxonomy import native_object, non_native_object, region_from_bbox
 
 try:
     from langgraph.graph import END, StateGraph
@@ -184,6 +184,25 @@ class ReportAgent:
             state["status"] = AgentStatus.CHAT
             state["message"] = ""
             return state
+
+        # Region resolution when the user didn't explicitly choose one (neither
+        # named in text nor picked in the frontend dropdown — see IntentService's
+        # region_explicit). The parser silently defaults such turns to 雅江, so we
+        # recover the real region from two better signals, in order:
+        #   1. the framed map AOI — if its centre lands in exactly one region's
+        #      geographic box, that's an unambiguous this-turn signal (fixes the
+        #      "framed 海淀 coords but agent asks 是雅江吗?" gap);
+        #   2. otherwise the session's earlier region, so it carries across turns.
+        # Done here — before the capability gate and every scenario / slot branch —
+        # so every downstream path (which rebuilds the request from intent.region)
+        # sees it. An explicit choice this turn always wins and is left untouched.
+        region_explicit = bool((intent.debug or {}).get("region_explicit"))
+        if not region_explicit:
+            inferred = region_from_bbox(state["request"].aoi)
+            if inferred:
+                intent.region = inferred
+            elif previous.get("region"):
+                intent.region = previous.get("region")
 
         # Capability gate: if the user is asking about a non-native object (湿地,
         # 机场, …) that has no ready custom model, hand off to annotation / ask to
@@ -375,8 +394,13 @@ class ReportAgent:
 
     # ------------------------------------------------- custom-model capability
 
-    def _detect_target_object(self, intent) -> str:
-        """The non-native analysis object named this turn, or "" if native."""
+    @staticmethod
+    def _detect_target_object(intent) -> str:
+        """The non-native analysis object named this turn, or "" if native.
+
+        ``non_native_object`` already strips region names, so a place like 雅江
+        can't collide with the "江"→河流 substring alias.
+        """
         return non_native_object(intent.user_prompt or "")
 
     def _gate_capability(self, state, intent, memory, previous):

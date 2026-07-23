@@ -58,7 +58,11 @@ class ReportRequest:
         raw_time_range = str(payload.get("time_range") or "").strip()
         return cls(
             task=str(payload.get("task") or ""),
-            region=str(payload.get("region") or "雅江区域"),
+            # Region is left empty when unspecified — the "雅江 default" is applied
+            # downstream by IntentService, so an empty region stays distinguishable
+            # from an explicit 雅江 choice (lets the agent inherit the session's
+            # region across turns instead of snapping back to the default).
+            region=str(payload.get("region") or ""),
             prompt=prompt,
             time_range=raw_time_range,
             session_id=str(payload.get("session_id") or "default"),
