@@ -158,6 +158,7 @@ Content-Type: application/json
 | --- | --- |
 | `ok` | 展示助手消息和报告卡片 |
 | `needs_input` | 展示补充提示，不展示报告 |
+| `needs_annotation` | 展示助手消息，并按 `action` 引导用户跳转标注页（见「非原生任务：自定义标注跳转」） |
 | `chat` | 展示自然语言回复，不展示报告 |
 
 ### ok 响应使用字段
@@ -224,6 +225,109 @@ const imageUrl = BASE + payload.analysis.charts[0].url;
   "message": "我是玄女遥感报告助手，可以帮你把自然语言需求整理成遥感专题任务，并生成图文报告。"
 }
 ```
+
+## 非原生任务：自定义标注跳转（重点）
+
+系统内置的任务（建筑物/道路/施工/水体/土地覆盖/土地利用/地物分类等）可以直接出报告。但当用户要分析的是**非内置地物**——例如「湿地」「机场」「河流」「操场」这类——系统没有现成模型，需要用户先去标注页标注少量样本、训练一个自定义模型，之后才能分析。
+
+这条链路由 `POST /api/report` 的 `status=needs_annotation` + `action` 字段驱动。**Agent 自己不打开任何页面**，只下达跳转指令，由前端决定如何打开（通常新标签页打开 `action.url`）。
+
+### 触发与响应
+
+用户说「帮我看看这块地的湿地分布」时，若没有可用的湿地模型，响应形如：
+
+```json
+{
+  "status": "needs_annotation",
+  "message": "『湿地』不是内置地物，需要先在标注页标注少量样本再训练，完成后回来告诉我就行。",
+  "action": {
+    "type": "open_annotation_ui",
+    "url": "http://<annotation-ui-base>/models/new?region_id=haidian&class=湿地&model_type=single_time_detection&training_method=xuannv_earth&month=202512",
+    "class_name": "湿地",
+    "model_type": "single_time_detection",
+    "training_method": "xuannv_earth",
+    "task_contract": { "temporal_mode": "single", "required_fields": ["month"] },
+    "params": { "region_id": "haidian", "class": "湿地", "model_type": "single_time_detection", "training_method": "xuannv_earth", "month": "202512" }
+  }
+}
+```
+
+### 前端处理
+
+1. 展示 `message`（助手气泡）。
+2. 渲染一个显眼的引导按钮，如「去标注页训练『湿地』模型」，点击后新标签页打开 `action.url`（`url` 已带好 `region_id / class / model_type / training_method`，可选 `month`）。也可以用 `action.params` 自行拼链。
+3. `action.model_type` 区分单期检测（`single_time_detection`）和变化检测（`change_detection`）；`task_contract.temporal_mode` 为 `single` 需 1 个月份，`pair` 需两期月份。这些是信息性字段，训练方式统一走后端默认（`training_method`），**前端不需要暴露训练法选择器**。
+
+### 恢复流程
+
+用户完成标注/训练后回到**同一会话**说「标注好了 / 训练完了 / 好了」，再次调 `/api/report`（带同一 `session_id`）即可。Agent 会**重新核验该模型的真实状态**，不轻信口头说法：
+
+- 模型已就绪 → 恢复原任务（沿用之前的月份/AOI）继续分析，返回 `status=ok` + 报告。
+- 仍在训练 → 返回 `status=needs_input`，提示稍候。
+- 训练失败 → 返回 `status=needs_annotation`，如实说明并再次给出 `action`（可重试标注）。
+
+前端无需自己记忆"待标注"状态——只要保持 `session_id` 不变，Agent 会跟踪 pending 模型并在下一轮自动接续。联调阶段可用 mock 页面承接 `action.url`。
+
+```js
+// needs_annotation 分流
+if (payload.status === "needs_annotation") {
+  showAssistantMessage(payload.message);
+  const a = payload.action; // {type:"open_annotation_ui", url, class_name, ...}
+  showActionButton(`去标注页训练『${a.class_name}』模型`, () => window.open(a.url, "_blank"));
+  // 用户回来后，正常发"标注好了"到同一 session 即可恢复
+}
+```
+
+## 地图图层与叠加显示（重点）
+
+报告的 `analysis.charts[]` 里每张图是一个 `ChartAsset`。除 `title / kind / url / caption` 外，三个字段决定它在地图上如何显示：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `overlay` | bool | `true`=可叠加到地图的**结果图层**（已地理配准）；`false`=普通内嵌图，只在报告正文里展示 |
+| `bounds_wgs84` | `[minLng,minLat,maxLng,maxLat]` | 图层的地理范围（WGS84）。仅当 `overlay=true` 时非空 |
+| `patch_id` | string | 图层覆盖的 patch；多 patch 拼接时为逗号分隔 ID 串，底图为空串 |
+
+### 前端渲染规则
+
+- **底图**（`卫星影像（框选区域）`）：`overlay=false`、`bounds_wgs84=[]`。作报告首图/地图底衬，不参与叠加。
+- **结果图层**（`overlay=true`）：用 `bounds_wgs84` 作为 image overlay 的地理范围，把 `url` 图片铺到地图上，可叠在底图之上并支持透明度。
+- **不必区分"一张拼接图"还是"多张逐 patch 图"**：后端能拼就拼成一张大图层（`bounds_wgs84` 为并集），拼不了就回退多张（各带自己的 `bounds_wgs84`）。前端只需遍历 `charts`、对 `overlay=true` 的逐张铺图。
+
+### 各任务/场景的图层
+
+| 报告类型 | `overlay=true` 图层 | 图层含义 |
+| --- | --- | --- |
+| 普通专题（建筑/道路/施工/水体/地物/土地覆盖/利用） | 专题结果图层 | 二值/多类彩色结果铺在选区上 |
+| 场景 A 片区体检（`checkup`） | `土地覆盖分类（N patch 拼接）` | 土地覆盖彩色分类图层 |
+| 场景 B 建设扰动监测（`change`） | `变化专题（N patch 拼接）` | 两期差分变化图层（新增/减少着色） |
+| 场景 C 补绿优先区评分（`score`） | `补绿压力热力图（N patch 拼接）` | 逐像素连续着色热力图层（红=高压、黄=中压、绿=低压） |
+
+### 最小叠图代码
+
+```js
+const BASE = "http://112.111.7.74:1112";
+
+function renderCharts(analysis, map) {
+  for (const c of analysis.charts || []) {
+    const src = BASE + c.url;
+    if (c.overlay && Array.isArray(c.bounds_wgs84) && c.bounds_wgs84.length === 4) {
+      const [minLng, minLat, maxLng, maxLat] = c.bounds_wgs84;
+      // 多数地图库用 [lat, lng] 顺序，注意翻转
+      map.addImageOverlay(src, [[minLat, minLng], [maxLat, maxLng]], { title: c.title, opacity: 0.75 });
+    } else {
+      appendInlineImage(src, c.caption); // 底图 / 非叠加图
+    }
+  }
+}
+```
+
+### 场景 B/C 地块级明细
+
+`analysis.aef_payload.top_patches` 给出逐 patch 排行（补绿优先区 / 净变化最大的地块）：
+
+- **场景 C（`score`）**：`{rank, patch_id, score, band, impervious_ratio, green_ratio, bounds}`。这里的 `bounds` 是 **UTM 投影坐标（米），不是经纬度**；地图高亮请优先用对应结果图层的 `bounds_wgs84`，或用 `patch_id` 去 `/api/patches/search` 结果里取 `bounds_wgs84`。
+- **场景 B（`change`）**：`{label(=patch_id), gained_ha, lost_ha, net_ha, ratio}`，不含坐标，用 `patch_id` 关联高亮。
 
 ## 历史会话
 
@@ -360,6 +464,8 @@ async function sendReport({sessionId, region, task, prompt, selectedPatchIds, se
 - 点击候选 patch 可多选/取消；发送报告请求会携带完整的 `selected_patch_ids` 和 `aoi`。
 - 多 patch 报告能展示合计指标、每个 patch 的处理状态和多个地图图层。
 - `status=needs_input` 时不弹错误，只展示补充提示。
+- `status=needs_annotation` 时展示引导按钮，点击能用 `action.url` 打开标注页；用户回来说"标注好了"能在同一会话恢复。
+- 报告图层：`overlay=true` 的图能用 `bounds_wgs84` 叠到地图，`overlay=false` 的底图正常内嵌。
 - `status=chat` 时只展示文本回复。
 - `status=ok` 时展示报告卡片、图片、HTML 预览和 Markdown 入口。
 - 历史会话列表可恢复上一轮消息和报告。

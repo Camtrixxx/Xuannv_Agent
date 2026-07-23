@@ -35,6 +35,65 @@ except ImportError:
     StaticFiles = None
 
 
+# --- OpenAPI request/response schemas ------------------------------------
+# Purpose is Swagger (/docs) documentation only: the route handlers still take
+# the raw dict and go through ReportRequest.from_dict / PatchSelectionService,
+# so runtime behaviour is unchanged. Requests allow extra fields so the schema
+# can never reject a payload the dict path would have accepted.
+try:
+    from pydantic import BaseModel, ConfigDict, Field
+
+    class ReportRequestModel(BaseModel):
+        """Body of POST /api/report."""
+        model_config = ConfigDict(extra="allow", json_schema_extra={"examples": [{
+            "session_id": "frontend-session-001",
+            "region": "北京市海淀区",
+            "task": "建筑物提取",
+            "prompt": "给我一份2026年3月建筑物提取报告",
+            "selected_patch_ids": ["patch_000000", "patch_000001"],
+            "aoi": {"type": "bbox", "coordinates": [116.19, 39.88, 116.24, 39.91]},
+        }]})
+
+        prompt: str = Field(..., description="用户自然语言输入（必填）")
+        session_id: str = Field("default", description="会话 ID，前端应为每个聊天窗口生成稳定 ID")
+        task: str = Field("", description="前端选择的任务，可为空；空时由 Agent 从自然语言提取或追问")
+        region: str = Field("", description="前端选择的地区，可为空；空时按文本/框选 AOI 推断，否则默认雅江区域")
+        time_range: str = Field("", description="YYYY-MM，前端已知月份时可直接传")
+        selected_patch_ids: list[str] = Field(default_factory=list, description="地图选中的 patch ID 列表")
+        aoi: dict = Field(default_factory=dict, description="地图框选范围 {type:'bbox', coordinates:[minLng,minLat,maxLng,maxLat]}")
+        before_time_range: str = Field("", description="场景 B 两期对比的前期月份 YYYY-MM")
+        after_time_range: str = Field("", description="场景 B 两期对比的后期月份 YYYY-MM")
+        custom_model_id: str = Field("", description="自定义模型 ID（非原生地物分析时由 Agent 内部解析，前端一般不传）")
+        target_object: str = Field("", description="非原生分析对象（如湿地），前端一般不传，由 Agent 解析")
+
+    class PatchSearchModel(BaseModel):
+        """Body of POST /api/patches/search."""
+        model_config = ConfigDict(extra="allow", json_schema_extra={"examples": [{
+            "region": "北京市海淀区",
+            "task": "",
+            "time_range": "",
+            "bbox": [116.24, 39.88, 116.30, 39.93],
+            "limit": 12,
+        }]})
+
+        region: str = Field(..., description="地区名，如 北京市海淀区 / 哈尔滨新区 / 雅江区域")
+        bbox: list[float] = Field(..., description="[minLng, minLat, maxLng, maxLat]，四个有限数字")
+        task: str = Field("", description="任务名，可为空（先框选后补任务）")
+        time_range: str = Field("", description="YYYY-MM，可为空")
+        limit: int = Field(12, description="返回候选 patch 上限")
+
+    class SessionResetModel(BaseModel):
+        """Body of POST /api/session/reset."""
+        model_config = ConfigDict(json_schema_extra={"examples": [{"session_id": "frontend-session-001"}]})
+        session_id: str = Field("default", description="要清空的会话 ID")
+
+except ImportError:
+    BaseModel = None
+    ReportRequestModel = None
+    PatchSearchModel = None
+    SessionResetModel = None
+
+
 def parse_args() -> argparse.Namespace:
     config = load_config()
     parser = argparse.ArgumentParser(description="Serve the Xuannv Agent backend.")
@@ -245,7 +304,19 @@ def create_app(agent: ReportAgent | None = None):
 
     report_agent = agent or ReportAgent()
     patch_selector = PatchSelectionService()
-    app = FastAPI(title="Xuannv Agent", version="0.2.0")
+    app = FastAPI(
+        title="Xuannv Agent",
+        version="0.2.0",
+        description=(
+            "玄女遥感专题报告 Agent 的统一入口。前端只调用本服务。\n\n"
+            "- 完整接口文档：[/api-docs](/api-docs)\n"
+            "- 前端接入指南：[/frontend-guide](/frontend-guide)\n"
+            "- 健康检查：[/api/health](/api/health)\n\n"
+            "核心接口是 `POST /api/report`，按返回 `status` 分流（ok / needs_input / "
+            "needs_annotation / chat）。非内置地物走标注训练交接（`needs_annotation` + `action`）；"
+            "报告图层通过 `analysis.charts[].overlay` + `bounds_wgs84` 叠加到地图。"
+        ),
+    )
     config = load_config()
     if CORSMiddleware is not None:
         app.add_middleware(
@@ -310,26 +381,42 @@ def create_app(agent: ReportAgent | None = None):
             "memory": report_agent.memory_service.snapshot(session_id),
         }
 
-    @app.post("/api/report")
-    def report(payload: dict) -> JSONResponse:
+    @app.post(
+        "/api/report",
+        summary="主接口：对话 / 补槽 / 生成报告",
+        description=(
+            "自然语言驱动的统一入口。返回体的 `status` 决定前端行为：`ok`(报告已生成)、"
+            "`needs_input`(缺任务/月份或月份不可用)、`needs_annotation`(非内置地物需先标注训练，"
+            "见 `action`)、`chat`(闲聊/追问)。详见 /api-docs 与 /frontend-guide。"
+        ),
+    )
+    def report(payload: ReportRequestModel) -> JSONResponse:
         try:
-            request = ReportRequest.from_dict(payload)
+            request = ReportRequest.from_dict(payload.model_dump())
             response = report_agent.run(request)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(to_dict(response))
 
-    @app.post("/api/patches/search")
-    def search_patches(payload: dict) -> JSONResponse:
+    @app.post(
+        "/api/patches/search",
+        summary="地图选区检索候选 patch",
+        description=(
+            "把地图框选的 bbox 交给 Agent，返回按 bbox 相交度排序的候选 patch（含 `bounds_wgs84`）。"
+            "`task`/`time_range` 可留空以支持先框选后补任务。检索问题以 `status=invalid`(重新框选) 或 "
+            "`retryable_error`(稍后重试) 返回，不伪装成 HTTP 500。"
+        ),
+    )
+    def search_patches(payload: PatchSearchModel) -> JSONResponse:
         try:
-            result = patch_selector.search(payload)
+            result = patch_selector.search(payload.model_dump())
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(to_dict(result))
 
-    @app.post("/api/session/reset")
-    def reset_session(payload: dict) -> dict:
-        session_id = str(payload.get("session_id") or "default")
+    @app.post("/api/session/reset", summary="清空会话记忆")
+    def reset_session(payload: SessionResetModel) -> dict:
+        session_id = str(payload.session_id or "default")
         report_agent.memory_service.reset(session_id)
         return {"status": "ok", "session_id": session_id}
 

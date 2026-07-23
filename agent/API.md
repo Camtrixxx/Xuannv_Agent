@@ -123,7 +123,7 @@ Frontend
 | 字段 | 含义 |
 | --- | --- |
 | `type` | 指令类型，目前只有 `open_annotation_ui`。前端据此决定处理方式 |
-| `url` | 标注页深链，已带好 `region_id / class / model_type / training_method`（可选 `month`）。基址取环境变量 `AGENT_ANNOTATION_UI_BASE`（默认与 embedding-api 同址）|
+| `url` | 标注页深链，已带好 `region_id / class / model_type / training_method`（可选 `month`）。基址取环境变量 `AGENT_ANNOTATION_UI_BASE`（默认与 embedding-api 同址）。**注意 query 里的中文类名已做 URL 编码**（如 `class=%E6%B9%BF%E5%9C%B0`=湿地）；需要明文类名时用 `class_name` 或 `params.class`，不要从 `url` 里解 |
 | `training_method` | 该区默认训练方式（`xuannv_earth`），信息性字段，来自 capabilities |
 | `task_contract` | 该任务的时相契约：`temporal_mode`(single/pair) + `required_fields`，来自 capabilities |
 | `class_name` | 待标注/训练的目标类名（=用户所说的非内置地物）|
@@ -200,7 +200,7 @@ Agent 只有在用户**明确请求生成报告**时才会生成报告；提问�
 说明：
 - 缺月份或未框选 AOI 时返回 `needs_input`，`message` 会分别友好追问；多轮补齐后场景保持不变（sticky）。
 - 纯问句（"这个对比准不准"、"哪里缺绿吗"）按既有原则走讨论，不触发报告。
-- 场景 B/C 的地块级明细在 `report.aef_payload.top_patches`（含 `bounds`，供前端在地图上高亮）。
+- 场景 B/C 的地块级明细在 `analysis.aef_payload.top_patches`；结构与地图高亮方式见下文「场景 B/C 的地块级明细」。
 - v1 仅海淀开放；绿地率来自土地覆盖模型，报告 `limitations` 中已标注其精度局限。
 
 哈尔滨请求示例：
@@ -280,6 +280,77 @@ Agent 只有在用户**明确请求生成报告**时才会生成报告；提问�
 - 地物分类等含类别分布的任务会返回 `analysis.data_table`（类别 + 占比），前端可渲染成分布表/占比条。
 - `report` 卡片只需 `title`、`html_url`、`markdown_url` 即可展示；正文详情在 HTML 报告里。
 
+### 地图图层与叠加显示（重点）
+
+`analysis.charts[]` 里的每张图都是一个 `ChartAsset`。除了 `title / kind / url / caption`，图层相关的三个字段决定它在地图上如何显示：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `overlay` | bool | `true` = 这是一张**可叠加到地图的结果图层**（已地理配准）；`false` = 普通内嵌图，只在报告正文里平铺展示，不上地图 |
+| `bounds_wgs84` | `[minLng, minLat, maxLng, maxLat]` | 该图层在地图上的地理范围（WGS84 经纬度）。**仅当 `overlay=true` 时非空**；用它把 `url` 图片作为 image overlay 铺到对应经纬度范围 |
+| `patch_id` | string | 该图层覆盖的 patch。多 patch 拼接时是逗号分隔的 ID 串（如 `patch_000000,patch_000001`），单 patch 时是单个 ID，底图为空串 |
+
+前端渲染规则：
+
+- **底图**（`卫星影像（框选区域）`）：`overlay=false`、`bounds_wgs84=[]`。作为报告首图或地图底衬展示，不参与图层叠加。
+- **结果图层**（`overlay=true`）：用 `bounds_wgs84` 作为 image overlay 的地理范围铺到地图上，`url` 为图片地址（拼 `AGENT_BASE_URL`）。图层可与底图叠加，支持透明度调节。
+- **一图 or 多图**：多 patch 选区会优先在后端拼接成**一张无缝大图层**（标题形如 `建筑物提取专题结果（N patch 拼接）`，`bounds_wgs84` 为各 patch 的并集，`patch_id` 为逗号分隔全集）；当 patch 选区不连续、分辨率不一致或拼接失败时，回退为**逐 patch 多张图层**（每张各带自己的 `bounds_wgs84` 和单个 `patch_id`）。两种情况前端处理方式一致：遍历 `charts`，对 `overlay=true` 的逐张铺图即可，无需区分拼接与否。
+
+不同任务/场景的图层类型：
+
+| 报告类型 | `overlay=true` 的图层 | 说明 |
+| --- | --- | --- |
+| 普通专题报告（建筑/道路/施工/水体/地物） | 专题结果图层 | 二值/多类专题彩色结果，铺在选区上 |
+| 场景 A 片区体检（`checkup`） | `土地覆盖分类（N patch 拼接）` | 片区土地覆盖彩色分类图层 |
+| 场景 B 建设扰动监测（`change`） | `变化专题（N patch 拼接）` | 两期差分的变化图层（新增/减少着色） |
+| 场景 C 补绿优先区评分（`score`） | `补绿压力热力图（N patch 拼接）` | 逐像素连续着色的压力热力图层（红=高压、黄=中压、绿=低压） |
+
+示例（一张底图 + 一张拼接结果图层）：
+
+```json
+"charts": [
+  {
+    "title": "卫星影像（框选区域）",
+    "kind": "image",
+    "url": "/reports/assets/basemap_xxxx.png",
+    "caption": "所选区域的高清卫星影像。",
+    "overlay": false,
+    "bounds_wgs84": [],
+    "patch_id": ""
+  },
+  {
+    "title": "建筑物提取专题结果（2 patch 拼接）",
+    "kind": "image",
+    "url": "/reports/assets/haidian_building_xxxx.png",
+    "caption": "所选 patch 的建筑物提取彩色结果，可叠加到地图。",
+    "overlay": true,
+    "bounds_wgs84": [116.239959, 39.885118, 116.269775, 39.896843],
+    "patch_id": "patch_000000,patch_000001"
+  }
+]
+```
+
+最小叠图逻辑（伪代码）：
+
+```js
+const BASE = "http://112.111.7.74:1112";
+for (const c of analysis.charts) {
+  if (c.overlay && c.bounds_wgs84?.length === 4) {
+    const [minLng, minLat, maxLng, maxLat] = c.bounds_wgs84;
+    addImageOverlay(BASE + c.url, [[minLat, minLng], [maxLat, maxLng]]); // 注意地图库多用 [lat,lng]
+  } else {
+    showInlineImage(BASE + c.url); // 底图 / 非叠加图
+  }
+}
+```
+
+### 场景 B/C 的地块级明细
+
+场景 B（`change`）与 C（`score`）在 `analysis.aef_payload.top_patches` 里给出逐 patch 明细，供前端做排行榜或地图高亮：
+
+- **场景 C（`score`）** 每项：`{rank, patch_id, score, band(高压/中压/低压), impervious_ratio, green_ratio, bounds}`。注意这里的 `bounds` 是 **UTM 投影坐标**（米），**不是经纬度**；若要在经纬度地图上高亮该 patch，请优先使用对应结果图层的 `bounds_wgs84`，或用 `patch_id` 去 `/api/patches/search` 的结果里取 `bounds_wgs84`。
+- **场景 B（`change`）** 每项：`{label(=patch_id), gained_ha, lost_ha, net_ha, ratio}`，按净变化排序；不含坐标，如需高亮同样用 `patch_id` 关联。
+
 哈尔滨报告响应中的 `analysis.data_source` 为 `harbin_embedding_api`，`analysis.aef_payload` 会包含：
 
 ```json
@@ -294,7 +365,7 @@ Agent 只有在用户**明确请求生成报告**时才会生成报告；提问�
 }
 ```
 
-海淀报告响应中的 `analysis.data_source` 为 `haidian_embedding_api`，`analysis.aef_payload` 会包含：
+海淀报告响应中的 `analysis.data_source` 为 `haidian_embedding_api`。海淀普通专题报告支持**多 patch 合计**（选中 N 个 patch 时，指标为区域合计、图层为多 patch 拼接），`analysis.aef_payload` 会包含：
 
 ```json
 {
@@ -303,10 +374,20 @@ Agent 只有在用户**明确请求生成报告**时才会生成报告；提问�
   "task": "building_extraction",
   "version": "v1",
   "month": "202512",
-  "patch": {"patch_id": "patch_000000"},
+  "patch_count": 2,
+  "requested_patch_ids": ["patch_000000", "patch_000001"],
+  "used_patch_ids": ["patch_000000", "patch_000001"],
+  "failed_patch_ids": [],
+  "omitted_patch_ids": [],
+  "selected_patch_ids": ["patch_000000", "patch_000001"],
+  "patch_selection_source": "frontend_selected_patch",
   "task_api_status": "available"
 }
 ```
+
+- `used_patch_ids` 是**实际参与出图与指标汇总**的 patch；`failed_patch_ids` 为抓取失败被跳过的；`omitted_patch_ids` 为超出上限未处理的。前端可据此展示"命中 N 个 patch / M 个失败"。
+- 单 patch 是 `patch_count=1` 的自然特例，字段结构一致。
+- 后续轮次若只换任务/月份（"换成道路提取"），Agent 会沿用上一轮 `used_patch_ids` 整组 patch，无需前端重传。
 
 缺信息响应示例（缺任务/月份时会列出该地区可选任务与月份范围）：
 

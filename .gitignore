@@ -26,6 +26,9 @@ agent/runtime/
 downloads/
 *.log
 
+# Local manual probes (user-simulation harness, not part of the test suite)
+scripts/sim_user.py
+
 # Data / model artifacts
 data/
 outputs/
