@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from agent.tools.scoring import pressure_score, rank_patches, summarize_scores
+import numpy as np
+
+from agent.tools.scoring import (
+    pressure_field_rgba,
+    pressure_score,
+    rank_patches,
+    summarize_scores,
+)
 
 
 def test_score_monotonic_in_impervious():
@@ -70,3 +77,25 @@ def test_summarize_scores():
 def test_summarize_empty():
     out = summarize_scores([])
     assert out["patch_count"] == 0 and out["mean_score"] is None
+
+
+def test_pressure_field_rgba_shape_and_alpha():
+    imp = np.zeros((16, 16), dtype=bool)
+    green = np.zeros((16, 16), dtype=bool)
+    rgba = pressure_field_rgba(imp, green, alpha=150)
+    assert rgba.shape == (16, 16, 4)
+    assert int(rgba[..., 3].max()) == 150 and int(rgba[..., 3].min()) == 150
+
+
+def test_pressure_field_high_is_red_low_is_green():
+    # Left half fully built + no green → high pressure (red);
+    # right half fully green + no build → low pressure (green).
+    imp = np.zeros((8, 8), dtype=bool)
+    imp[:, :4] = True
+    green = np.zeros((8, 8), dtype=bool)
+    green[:, 4:] = True
+    rgba = pressure_field_rgba(imp, green, radius=0)  # no smoothing → crisp halves
+    left = rgba[0, 0]   # built, no green → red end
+    right = rgba[0, 7]  # green, no build → green end
+    assert left[0] > left[1] and left[0] > 150   # red dominant
+    assert right[1] > right[0] and right[1] > 150  # green dominant

@@ -23,10 +23,11 @@ from agent.schemas.report import AnalysisResult, ChartAsset, MetricCard, ReportR
 from agent.services.aoi_cover_service import AoiCoverService
 from agent.services.patch_selection_service import PatchSelectionService
 from agent.services.satellite_basemap import basemap_chart
-from agent.tools.classmap import class_distribution, normalize_legend
+from agent.tools.change import mask_for_task
+from agent.tools.classmap import class_distribution, class_mask, normalize_legend
 from agent.tools.mosaic import build_mosaic_overlay
 from agent.tools.raster import area_ha_from_bounds, binary_coverage
-from agent.tools.scoring import band_rgba, pressure_score, rank_patches, summarize_scores
+from agent.tools.scoring import pressure_field_rgba, pressure_score, rank_patches, summarize_scores
 
 BUILDING_TASK = "building_extraction"
 LAND_COVER_TASK = "land_cover_classification"
@@ -70,7 +71,7 @@ class PressureScoreService:
 
         summary = summarize_scores(scored)
         ranked = rank_patches(scored, top_n=TOP_N)
-        overlays = self._score_overlays(scored, month)
+        overlays = self._score_overlays(region_id, scored, month)
         return self._build_result(request, month, summary, ranked, overlays)
 
     def _resolve_patches(self, region_id: str, month: str, bbox: list[float]) -> list[dict[str, Any]]:
@@ -142,15 +143,18 @@ class PressureScoreService:
             )
         return scored
 
-    def _score_overlays(self, scored: list[dict[str, Any]], month: str) -> list[ChartAsset]:
-        """Render each patch as a solid band-colour tile, stitch into one heatmap.
+    def _score_overlays(self, region_id: str, scored: list[dict[str, Any]], month: str) -> list[ChartAsset]:
+        """Render a pixel-level continuous pressure field per patch → one heatmap.
 
-        High=red / medium=orange / low=green, semi-transparent so the satellite
-        basemap reads through. Patches missing WGS84 bounds are left off the map.
+        Inside each patch, built-up density and green deficit are computed per
+        pixel (box-smoothed) and coloured on a green→yellow→red ramp, so the map
+        shows a smooth pressure surface rather than one flat colour per patch.
+        Patches missing WGS84 bounds or result PNGs are left off the map.
         """
+        legend = self._get_legend(region_id)
         tiles: list[dict[str, Any]] = []
         for row in scored:
-            tile = self._render_band_tile(row, month)
+            tile = self._render_field_tile(region_id, row, month, legend)
             if tile is not None:
                 tiles.append(tile)
         return build_mosaic_overlay(
@@ -160,24 +164,32 @@ class PressureScoreService:
             fingerprint=f"score:{month}",
             merged_title="补绿压力热力图（{n} patch 拼接）",
             merged_caption=(
-                "红=高压（补绿最优先）、橙=中压、绿=低压，按 UTM 网格将 {n} 个 patch "
-                "拼接为一张连续图，叠加在卫星底图上。"
+                "红=高压（补绿最优先）、黄=中压、绿=低压，按像素计算硬化强度与绿地缺口后连续着色，"
+                "并按 UTM 网格将 {n} 个 patch 拼接为一张连续图，叠加在卫星底图上。"
             ),
             per_patch_title="补绿压力 · {patch_id}",
-            per_patch_caption="红=高压（补绿最优先）、橙=中压、绿=低压。",
+            per_patch_caption="红=高压（补绿最优先）、黄=中压、绿=低压（按像素连续着色）。",
         )
 
-    def _render_band_tile(self, row: dict[str, Any], month: str) -> dict[str, Any] | None:
+    def _render_field_tile(
+        self, region_id: str, row: dict[str, Any], month: str, legend: list[dict[str, Any]]
+    ) -> dict[str, Any] | None:
         bounds_wgs84 = [float(v) for v in (row.get("bounds_wgs84") or [])][:4]
         if len(bounds_wgs84) != 4:
             return None
         patch_id = str(row.get("patch_id") or "")
-        colour = band_rgba(str(row.get("band") or ""))
-        # A small solid tile is enough — the map georeferences it to patch bounds;
-        # the mosaic paste scales tiles by shared pixels-per-metre, so equal sizes.
-        rgba = np.zeros((128, 128, 4), dtype=np.uint8)
-        rgba[:, :] = colour
-        digest = hashlib.sha1(f"{patch_id}:{month}:{row.get('band')}".encode("utf-8")).hexdigest()[:12]
+        if not patch_id:
+            return None
+        bld_arr = self.aoi_cover.fetch_result_array(region_id, patch_id, BUILDING_TASK, month)
+        lc_arr = self.aoi_cover.fetch_result_array(region_id, patch_id, LAND_COVER_TASK, month)
+        if bld_arr is None or lc_arr is None:
+            return None
+        imp_mask = mask_for_task(bld_arr, BUILDING_TASK)
+        green_mask = class_mask(lc_arr, legend, GREEN_NAME_CUES)
+        if imp_mask is None or imp_mask.shape != green_mask.shape:
+            return None
+        rgba = pressure_field_rgba(imp_mask, green_mask)
+        digest = hashlib.sha1(f"{patch_id}:{month}:field".encode("utf-8")).hexdigest()[:12]
         out_path = self.asset_dir / f"haidian_score_{patch_id}_{digest}.png"
         try:
             Image.fromarray(rgba, mode="RGBA").save(out_path)

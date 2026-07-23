@@ -35,6 +35,23 @@ def _colors(n_white, n_other, other_rgb):
     return [(n_white, WHITE), (n_other, other_rgb)]
 
 
+def _array_from_colors(spec, size=128):
+    """Build a size×size RGB array laying out each (count, rgb) block by row-major
+    proportion, so pixel-level overlays have real pixels to smooth over."""
+    import numpy as np
+
+    total_spec = sum(c for c, _ in spec) or 1
+    arr = np.zeros((size * size, 3), dtype=np.uint8)
+    idx = 0
+    for count, rgb in spec:
+        n = round(count / total_spec * size * size)
+        arr[idx:idx + n] = rgb
+        idx += n
+    if idx < size * size:  # rounding remainder → last colour
+        arr[idx:] = spec[-1][1]
+    return arr.reshape(size, size, 3)
+
+
 def _req(aoi=None, tr="2025-12"):
     return ReportRequest(task="", region="北京市海淀区", prompt="补绿优先", time_range=tr,
                          session_id="score-t", aoi=aoi if aoi is not None else AOI)
@@ -51,6 +68,14 @@ def _svc(monkeypatch, patches, building_by_patch, landcover_by_patch):
         return landcover_by_patch.get(patch_id)
 
     monkeypatch.setattr(svc.aoi_cover, "_result_colors", fake_colors)
+
+    def fake_array(region_id, patch_id, task_id, month, model_id=""):
+        spec = (building_by_patch if task_id == "building_extraction" else landcover_by_patch).get(patch_id)
+        if spec is None:
+            return None
+        return _array_from_colors(spec)
+
+    monkeypatch.setattr(svc.aoi_cover, "fetch_result_array", fake_array)
     return svc
 
 

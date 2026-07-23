@@ -46,6 +46,33 @@ def _nearest(rgb: tuple[int, int, int], legend: list[dict[str, Any]]) -> dict[st
     return best if best_d <= _MATCH_MAX_DIST2 else None
 
 
+def class_mask(rgb_array, legend: list[dict[str, Any]], name_cues: Iterable[str]):
+    """Boolean HxW mask of pixels whose nearest legend class name matches a cue.
+
+    ``rgb_array`` is HxWx3 uint8. Every pixel is assigned to its nearest legend
+    colour (within ``_MATCH_MAX_DIST2``); a pixel is True when that class's name
+    contains any of ``name_cues`` (e.g. 树/林/草 for green). Vectorized so it runs
+    over a full 128×128 tile cheaply. Returns an all-False mask when the legend is
+    empty or no class matches a cue.
+    """
+    import numpy as np
+
+    h, w = rgb_array.shape[:2]
+    if not legend:
+        return np.zeros((h, w), dtype=bool)
+    cues = tuple(name_cues)
+    wanted = [any(c in (cls.get("name") or "") for c in cues) for cls in legend]
+    flat = rgb_array.reshape(-1, 3).astype(np.int32)
+    palette = np.asarray([cls["rgb"] for cls in legend], dtype=np.int32)  # Kx3
+    # Squared distance from every pixel to every legend colour → nearest index.
+    d2 = ((flat[:, None, :] - palette[None, :, :]) ** 2).sum(axis=2)  # NxK
+    nearest = d2.argmin(axis=1)
+    nearest_d2 = d2[np.arange(d2.shape[0]), nearest]
+    wanted_arr = np.asarray(wanted, dtype=bool)
+    hit = wanted_arr[nearest] & (nearest_d2 <= _MATCH_MAX_DIST2)
+    return hit.reshape(h, w)
+
+
 def class_distribution(
     color_counts: Iterable[tuple[int, tuple[int, int, int]]],
     legend: list[dict[str, Any]],

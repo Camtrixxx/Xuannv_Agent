@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from agent.tools.classmap import class_distribution, hex_to_rgb, normalize_legend
+import numpy as np
+
+from agent.tools.classmap import class_distribution, class_mask, hex_to_rgb, normalize_legend
 
 # Real Haidian land_cover legend subset.
 RAW_LEGEND = [
@@ -67,3 +69,24 @@ def test_no_area_when_bounds_missing():
     rows = class_distribution([(16384, TREE)], LEGEND, None)
     assert rows[0]["ratio"] == 1.0
     assert "value" not in rows[0]
+
+
+def test_class_mask_matches_named_classes():
+    # Top-left quadrant tree (green), rest built-up. Cue "树" → only tree pixels.
+    arr = np.full((4, 4, 3), BUILT, dtype=np.uint8)
+    arr[:2, :2] = TREE
+    mask = class_mask(arr, LEGEND, ("树",))
+    assert mask.sum() == 4
+    assert mask[0, 0] and not mask[3, 3]
+
+
+def test_class_mask_empty_legend_all_false():
+    arr = np.full((3, 3, 3), TREE, dtype=np.uint8)
+    mask = class_mask(arr, [], ("树",))
+    assert mask.shape == (3, 3) and not mask.any()
+
+
+def test_class_mask_no_cue_match_all_false():
+    arr = np.full((3, 3, 3), TREE, dtype=np.uint8)
+    mask = class_mask(arr, LEGEND, ("道路",))
+    assert not mask.any()
