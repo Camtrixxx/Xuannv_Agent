@@ -128,6 +128,6 @@ def test_report_map_contains_all_patch_layers(tmp_path):
         ],
     )
     section, _, script = ReportService(config=ReportConfig(report_dir=tmp_path, asset_dir=tmp_path))._result_map_html(analysis)
-    assert "地图包含 2 个 patch 结果图层" in section
+    assert "地图包含 2 个结果图层" in section
     assert '"title": "p1"' in script
     assert '"title": "p2"' in script

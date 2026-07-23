@@ -71,13 +71,18 @@ def test_change_reports_growth(monkeypatch):
     assert any("净变化" in l for l in labels)
 
 
-def test_change_emits_map_overlays(monkeypatch, tmp_path):
-    # A patch with WGS84 bounds should produce an overlay=True change PNG per
-    # patch so the report map can georeference red=gained / blue=lost.
-    wgs = [116.20, 39.88, 116.26, 39.92]
+def test_change_merges_patches_into_one_overlay(monkeypatch, tmp_path):
+    # Multiple patches on the same UTM grid stitch into ONE mosaic overlay so
+    # the report map shows a single toggle and the body a single figure (like
+    # road/building reports), not one layer per patch.
+    # Two adjacent tiles stacked north/south so they form a real 2-tile grid.
+    south = [435014.236, 4415283.021, 436294.236, 4416563.021]
+    north = [435014.236, 4416563.021, 436294.236, 4417843.021]
+    swgs = [116.20, 39.88, 116.26, 39.90]
+    nwgs = [116.20, 39.90, 116.26, 39.92]
     patches = [
-        {"patch_id": "p1", "bounds": BOUNDS, "bounds_wgs84": wgs},
-        {"patch_id": "p2", "bounds": BOUNDS, "bounds_wgs84": wgs},
+        {"patch_id": "p1", "bounds": south, "bounds_wgs84": swgs},
+        {"patch_id": "p2", "bounds": north, "bounds_wgs84": nwgs},
     ]
     arrays = {"202512": _img(10), "202605": _img(30)}
     svc = _svc_with(monkeypatch, patches, arrays)
@@ -85,11 +90,27 @@ def test_change_emits_map_overlays(monkeypatch, tmp_path):
     res = svc.analyze(_req())
 
     overlays = [c for c in res.charts if getattr(c, "overlay", False)]
-    assert len(overlays) == 2
-    for c in overlays:
-        assert c.bounds_wgs84 == wgs
-        assert c.url.startswith("/reports/assets/")
-        assert (tmp_path / c.url.rsplit("/", 1)[-1]).exists()
+    assert len(overlays) == 1
+    mosaic = overlays[0]
+    assert mosaic.patch_id == "p1,p2"
+    # Union WGS84 bounds span both tiles.
+    assert mosaic.bounds_wgs84 == [116.20, 39.88, 116.26, 39.92]
+    assert (tmp_path / mosaic.url.rsplit("/", 1)[-1]).exists()
+
+
+def test_change_single_patch_overlay(monkeypatch, tmp_path):
+    # A single patch can't be stitched → one per-patch overlay, still on the map.
+    wgs = [116.20, 39.88, 116.26, 39.92]
+    patches = [{"patch_id": "p1", "bounds": BOUNDS, "bounds_wgs84": wgs}]
+    arrays = {"202512": _img(10), "202605": _img(30)}
+    svc = _svc_with(monkeypatch, patches, arrays)
+    svc.asset_dir = tmp_path
+    res = svc.analyze(_req())
+
+    overlays = [c for c in res.charts if getattr(c, "overlay", False)]
+    assert len(overlays) == 1
+    assert overlays[0].bounds_wgs84 == wgs
+    assert (tmp_path / overlays[0].url.rsplit("/", 1)[-1]).exists()
 
 
 def test_change_default_task_when_unsupported(monkeypatch):

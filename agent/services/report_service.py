@@ -94,7 +94,7 @@ _RESULT_MAP_JS = """
     Object.keys(layerMap).forEach(function (name) { layerMap[name].addTo(map); });
     map.fitBounds(allBounds);
     L.control.layers({'卫星影像': sat}, Object.assign(layerMap, {'道路注记': labels}),
-      {position: 'topright', collapsed: false}).addTo(map);
+      {position: 'topright', collapsed: true}).addTo(map);
     var slider = document.getElementById('mapOpacity');
     var val = document.getElementById('mapOpacityVal');
     if (slider) {
@@ -459,6 +459,11 @@ class ReportService:
             '\n  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">'
             '\n  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>'
         )
+        map_footer = (
+            "结果图层已叠加在卫星底图上，可拖动上方滑块调节透明度；右上角可切换底图。"
+            if len(overlays) == 1
+            else f"地图包含 {len(overlays)} 个结果图层，可拖动滑块调节透明度、在右上角逐层开关。"
+        )
         section = f"""
     <section class="card" id="result-map">
       <h2>在地图上查看结果</h2>
@@ -468,7 +473,7 @@ class ReportService:
         <input type="range" min="0" max="100" value="70" id="mapOpacity">
         <span id="mapOpacityVal">70%</span>
       </div>
-      <p class="footer" style="text-align:left;margin-top:10px">地图包含 {len(overlays)} 个 patch 结果图层，可在右上角逐层开关。</p>
+      <p class="footer" style="text-align:left;margin-top:10px">{map_footer}</p>
     </section>"""
         cfg = json.dumps(
             {

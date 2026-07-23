@@ -22,6 +22,7 @@ from agent.services.haidian_embedding_service import TASK_DISPLAY, TASK_TO_HAIDI
 from agent.services.model_registry_service import ModelRegistryService
 from agent.services.patch_selection_service import PatchSelectionService
 from agent.services.satellite_basemap import basemap_chart
+from agent.tools.mosaic import stitch_tiles
 from agent.tools.change import (
     aggregate_change,
     binary_change,
@@ -73,13 +74,14 @@ class ChangeMonitorService:
         if not patches:
             raise RuntimeError("当前框选范围内没有可用于监测的 patch，请调整范围或月份。")
 
-        per_patch, rows, overlays = self._diff_patches(region_id, task_id, before, after, patches, model_id)
+        per_patch, rows, tiles = self._diff_patches(region_id, task_id, before, after, patches, model_id)
         agg = aggregate_change(per_patch)
         if agg["patch_count"] == 0:
             raise RuntimeError("两期结果均无法获取，无法计算变化。请更换月份或范围。")
         # Look up the custom model's training metadata once so the report can be
         # honest about method + feature source (and warn on AEF annual features).
         model_info = self.registry.model_status(model_id, region_id) if model_id else None
+        overlays = self._change_overlays(tiles, task_id, before, after)
         return self._build_result(
             request, task_id, before, after, agg, rows, model_id, custom_class, model_info, overlays
         )
@@ -118,15 +120,16 @@ class ChangeMonitorService:
         return bbox
 
     def _diff_patches(self, region_id, task_id, before, after, patches, model_id=""):
-        """Return (per_patch_change_dicts, table_rows, overlay_charts).
+        """Return (per_patch_change_dicts, table_rows, change_tiles).
 
         Skips patches missing a date. For every patch that diffs, also renders a
-        change-map PNG (gained red / lost blue / transparent elsewhere) as an
-        ``overlay=True`` ChartAsset so the report map can georeference it.
+        change-map PNG (gained red / lost blue / transparent elsewhere) and
+        collects it as a tile (png path + projected/WGS84 bounds) so ``analyze``
+        can stitch them into one mosaic overlay.
         """
         per_patch: list[dict[str, Any]] = []
         rows: list[dict[str, Any]] = []
-        overlays: list[ChartAsset] = []
+        tiles: list[dict[str, Any]] = []
         for patch in patches:
             patch_id = str(patch.get("patch_id") or "")
             if not patch_id:
@@ -157,21 +160,21 @@ class ChangeMonitorService:
                     "net_ha": change["net_ha"],
                 }
             )
-            overlay = self._change_overlay(patch, patch_id, task_id, before, after, mask_a, mask_b)
-            if overlay is not None:
-                overlays.append(overlay)
+            tile = self._render_change_tile(patch, patch_id, task_id, before, after, mask_a, mask_b)
+            if tile is not None:
+                tiles.append(tile)
         # Rank the table by net growth so the biggest movers surface first.
         rows.sort(key=lambda r: (r["net_ha"] if r["net_ha"] is not None else 0), reverse=True)
-        return per_patch, rows, overlays
+        return per_patch, rows, tiles
 
-    def _change_overlay(self, patch, patch_id, task_id, before, after, mask_a, mask_b) -> ChartAsset | None:
-        """Render one patch's change mask to a PNG and wrap it as a map overlay.
+    def _render_change_tile(self, patch, patch_id, task_id, before, after, mask_a, mask_b) -> dict[str, Any] | None:
+        """Render one patch's change mask to a PNG; return its tile descriptor.
 
         Returns None when the patch has no WGS84 bounds (nothing to georeference)
-        or the PNG can't be written — the report simply omits that layer.
+        or the PNG can't be written — that patch is simply left off the map.
         """
-        bounds = [float(v) for v in (patch.get("bounds_wgs84") or [])][:4]
-        if len(bounds) != 4:
+        bounds_wgs84 = [float(v) for v in (patch.get("bounds_wgs84") or [])][:4]
+        if len(bounds_wgs84) != 4:
             return None
         try:
             rgba = change_rgba(mask_a, mask_b)
@@ -183,15 +186,78 @@ class ChangeMonitorService:
             Image.fromarray(rgba, mode="RGBA").save(out_path)
         except (OSError, ValueError):
             return None
-        return ChartAsset(
-            title=f"变化专题 · {patch_id}",
-            kind="image",
-            url=f"/reports/assets/{out_path.name}",
-            caption="红色为新增、蓝色为减少的目标区域（两期逐像素差）。",
-            bounds_wgs84=bounds,
-            overlay=True,
-            patch_id=patch_id,
-        )
+        bounds_proj = patch.get("bounds") or []
+        bounds_proj = [float(v) for v in bounds_proj][:4] if len(bounds_proj) == 4 else []
+        return {
+            "patch_id": patch_id,
+            "path": out_path,
+            "bounds_wgs84": bounds_wgs84,
+            "bounds": bounds_proj,
+        }
+
+    def _change_overlays(self, tiles, task_id, before, after) -> list[ChartAsset]:
+        """Merge per-patch change PNGs into ONE mosaic overlay when possible.
+
+        Like the road/building report, multiple patches are stitched by their UTM
+        grid into a single seamless layer so the report map shows one toggle and
+        the body carries one figure. Falls back to per-patch overlays only when
+        stitching can't run (single patch, or missing/mismatched bounds).
+        """
+        if not tiles:
+            return []
+        used_ids = [t["patch_id"] for t in tiles]
+        stitchable = [(t["bounds"], t["path"]) for t in tiles if len(t.get("bounds") or []) == 4]
+        if len(stitchable) == len(tiles) and len(tiles) > 1:
+            union = self._union_wgs84([t["bounds_wgs84"] for t in tiles])
+            digest = hashlib.sha1(
+                f"{task_id}:{before}:{after}:{sorted(used_ids)}".encode("utf-8")
+            ).hexdigest()[:12]
+            out_path = self.asset_dir / f"haidian_change_mosaic_{task_id}_{digest}.png"
+            mosaic = stitch_tiles(stitchable, out_path)
+            if mosaic is not None and union is not None:
+                return [
+                    ChartAsset(
+                        title=f"变化专题（{len(used_ids)} patch 拼接）",
+                        kind="image",
+                        url=f"/reports/assets/{mosaic.name}",
+                        caption=(
+                            f"红色为新增、蓝色为减少的目标区域（两期逐像素差），"
+                            f"已按 UTM 网格将 {len(used_ids)} 个 patch 拼接为一张连续图。"
+                        ),
+                        bounds_wgs84=[float(v) for v in union][:4],
+                        overlay=True,
+                        patch_id=",".join(used_ids),
+                    )
+                ]
+        # Fallback: one overlay per patch (single patch, or stitching bailed).
+        return [
+            ChartAsset(
+                title=f"变化专题 · {t['patch_id']}",
+                kind="image",
+                url=f"/reports/assets/{t['path'].name}",
+                caption="红色为新增、蓝色为减少的目标区域（两期逐像素差）。",
+                bounds_wgs84=t["bounds_wgs84"],
+                overlay=True,
+                patch_id=t["patch_id"],
+            )
+            for t in tiles
+        ]
+
+    @staticmethod
+    def _union_wgs84(bounds_list) -> list[float] | None:
+        valid = [
+            [float(v) for v in item[:4]]
+            for item in bounds_list
+            if isinstance(item, list) and len(item) == 4
+        ]
+        if not valid:
+            return None
+        return [
+            min(item[0] for item in valid),
+            min(item[1] for item in valid),
+            max(item[2] for item in valid),
+            max(item[3] for item in valid),
+        ]
 
     def _build_result(self, request, task_id, before, after, agg, rows, model_id="", custom_class="", model_info=None, overlays=None) -> AnalysisResult:
         region = "北京市海淀区"
