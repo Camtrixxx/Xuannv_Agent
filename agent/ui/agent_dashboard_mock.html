@@ -472,6 +472,11 @@
     }
 
     .preview-pane {
+      /* Own stacking context: Leaflet's panes/controls carry z-index up to 1000,
+         which would otherwise compete with the area-selection modal in the root
+         context and cover it. Contained here, they only stack inside the pane. */
+      position: relative;
+      z-index: 0;
       min-width: 0;
       min-height: 0;
       display: none;
@@ -866,7 +871,8 @@
       place-items: center;
       padding: 24px;
       background: rgba(15, 23, 42, 0.28);
-      z-index: 10;
+      /* Above anything a map inside the page may raise itself to. */
+      z-index: 2000;
     }
 
     .modal-backdrop.show {
