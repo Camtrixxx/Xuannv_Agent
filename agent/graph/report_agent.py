@@ -16,7 +16,7 @@ from agent.services.aef_analysis_service import AEFAnalysisService
 from agent.services.analysis_service import MockAnalysisService
 from agent.services.intent_service import IntentService
 from agent.services.llm_provider import DeepSeekProvider, LLMProvider
-from agent.services.common import strip_markdown
+from agent.services.common import extract_json_object, strip_markdown
 from agent.services.memory_service import MemoryService
 from agent.services.region_availability import (
     coverage_hint,
@@ -341,6 +341,67 @@ class ReportAgent:
         state["message"] = copy["ok"]
         return state
 
+    def _llm_two_months(self, prompt: str) -> tuple[str, str] | None:
+        """Semantic two-month extraction for the change scenario.
+
+        Rule parsing (``infer_two_months``) only catches well-formed tokens. This
+        fallback uses the chat LLM to read fuzzy/relative phrasing ("今年一月到三月",
+        "2026-1和2026-3", "对比年初和现在"). Returns an ordered (before, after) pair
+        of distinct YYYY-MM months, or None on any failure (→ graceful ask). The
+        request/response API is unchanged; this is purely a backend extraction step.
+        """
+        text = (prompt or "").strip()
+        if not text:
+            return None
+        from datetime import date
+
+        today = getattr(self.intent_service, "today", None) or date.today()
+        system_prompt = (
+            "你从用户中文输入里抽取『建设扰动变化检测』要对比的两个月份。"
+            "只输出 JSON，不要解释。无法确定两个不同月份时把字段留空。"
+        )
+        user_prompt = json.dumps(
+            {
+                "用户输入": text,
+                "当前日期": today.isoformat(),
+                "说明": "解析相对表达（今年/去年/年初/月份中文数字）；两个月份可能写成区间或并列",
+                "输出要求": {
+                    "before": "较早的月份，YYYY-MM；无法确定留空",
+                    "after": "较晚的月份，YYYY-MM；无法确定留空",
+                },
+                "示例": [
+                    {"用户输入": "今年一月份到三月份", "before": "2026-01", "after": "2026-03"},
+                    {"用户输入": "2026-1和2026-3", "before": "2026-01", "after": "2026-03"},
+                    {"用户输入": "对比2025-12和2026-05", "before": "2025-12", "after": "2026-05"},
+                ],
+            },
+            ensure_ascii=False,
+        )
+        try:
+            raw = self.chat_llm.complete(system_prompt, user_prompt)
+        except Exception:
+            return None
+        if not raw:
+            return None
+        payload = extract_json_object(raw)
+        if not isinstance(payload, dict):
+            return None
+        before = self._normalize_month(payload.get("before"))
+        after = self._normalize_month(payload.get("after"))
+        if not (before and after) or before == after:
+            return None
+        return (before, after) if before < after else (after, before)
+
+    @staticmethod
+    def _normalize_month(value: Any) -> str:
+        """Coerce a model-returned month to canonical YYYY-MM, or '' if unusable."""
+        import re
+
+        m = re.search(r"(20\d{2})[-/.]?(1[0-2]|0?[1-9])", str(value or ""))
+        if not m:
+            return ""
+        return f"{m.group(1)}-{int(m.group(2)):02d}"
+
     def _merge_change(self, state, intent, memory, previous) -> ReportAgentState:
         """Slot logic for the 建设扰动监测 scenario: needs two months + a map AOI."""
         request = state["request"]
@@ -350,6 +411,11 @@ class ReportAgent:
         after = request.after_time_range or ""
         if not (before and after):
             before, after = infer_two_months(intent.user_prompt)
+        # Rule extraction only covers well-formed tokens ("2025-12", "2025年12月").
+        # For fuzzy/relative phrasing ("今年一月到三月", "2026-1和2026-3") fall back to
+        # the LLM's semantic reading before we recover a remembered pair or ask.
+        if not (before and after):
+            before, after = self._llm_two_months(intent.user_prompt) or (before, after)
         if not (before and after):
             before = before or previous.get("before_time_range") or ""
             after = after or previous.get("after_time_range") or ""
