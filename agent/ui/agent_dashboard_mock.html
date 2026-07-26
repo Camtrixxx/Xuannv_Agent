@@ -1427,6 +1427,10 @@
     const switchReportBtn = document.getElementById("switchReport");
     const switchMapBtn = document.getElementById("switchMap");
     let currentMarkdownPreview = null;
+    // The report currently rendered in the report view, and the newer one that
+    // arrived while the user was looking at the map (applied on switch back).
+    let currentPreview = null;
+    let nextReportPreview = null;
     // Right-pane view: "report" | "map". The result map is a separate Leaflet
     // instance from the area-selection map in the modal — different jobs.
     let previewMode = "report";
@@ -2006,9 +2010,8 @@
           <figcaption>${escapeHtml(chart.caption)}</figcaption>
         </figure>
       `).join("");
-      const layerCount = extractMapLayers(payload).length;
-      const mapLink = layerCount
-        ? `<a href="#" data-open-map="1">在地图上查看结果（${layerCount} 个图层）</a>`
+      const mapLink = extractMapLayers(payload).length
+        ? '<a href="#" data-open-map="1">在地图上查看结果</a>'
         : "";
       return `
         <div class="report-card">
@@ -2295,6 +2298,13 @@
         initResultMap();
         setMapLayers(pendingMapLayers);
       } else {
+        switchReportBtn.classList.remove("has-update");
+        if (nextReportPreview) {
+          const next = nextReportPreview;
+          nextReportPreview = null;
+          loadPreview(next.url, next.type, next.title);
+          return;
+        }
         previewTitle.textContent = currentMarkdownPreview ? currentMarkdownPreview.title : "报告预览";
         toggleMarkdownRaw.style.display = currentMarkdownPreview ? "inline-grid" : "none";
       }
@@ -2305,9 +2315,10 @@
       setPreviewMode("map");
     }
 
-    async function openPreview(url, type, title) {
-      app.classList.add("preview-open");
-      setPreviewMode("report");
+    // Render one report into the report view. Split out of openPreview so the
+    // live-update hook and setPreviewMode can reload without re-entering it.
+    async function loadPreview(url, type, title) {
+      currentPreview = {url, type, title};
       previewTitle.textContent = title || "报告预览";
       previewMeta.textContent = type === "markdown" ? "Markdown 预览" : "HTML";
       previewOpenRaw.href = url;
@@ -2328,12 +2339,49 @@
       previewBody.innerHTML = `<iframe class="preview-frame" src="${escapeHtml(url)}" title="${escapeHtml(title || "报告预览")}"></iframe>`;
     }
 
+    async function openPreview(url, type, title) {
+      app.classList.add("preview-open");
+      // An explicit click wins over anything queued by a live update.
+      nextReportPreview = null;
+      setPreviewMode("report");
+      await loadPreview(url, type, title);
+    }
+
+    // Live update for the report view: a new task result replaces whatever
+    // report the panel was showing, mirroring how the map view swaps layers.
+    // Prefers the same format the user was already reading.
+    function updateResultReport(payload) {
+      const report = (payload || {}).report || {};
+      if (!report.html_url && !report.markdown_url) {
+        return;
+      }
+      const wantMarkdown = currentPreview && currentPreview.type === "markdown" && report.markdown_url;
+      const type = wantMarkdown ? "markdown" : "html";
+      const url = wantMarkdown ? report.markdown_url : report.html_url;
+      if (!url) {
+        return;
+      }
+      const title = report.title || "报告预览";
+      if (previewMode === "report" && app.classList.contains("preview-open")) {
+        nextReportPreview = null;
+        loadPreview(url, type, title);
+        return;
+      }
+      // Panel closed, or the user is reading the map: queue it and flag the
+      // 报告 tab so it swaps in the moment that view is shown.
+      nextReportPreview = {url, type, title};
+      switchReportBtn.classList.add("has-update");
+    }
+
     function closePreview() {
       app.classList.remove("preview-open");
       previewBody.innerHTML = '<div class="preview-empty">点击报告链接后在这里查看内容。</div>';
       previewOpenRaw.href = "#";
       toggleMarkdownRaw.style.display = "none";
       currentMarkdownPreview = null;
+      currentPreview = null;
+      nextReportPreview = null;
+      switchReportBtn.classList.remove("has-update");
       // Keep the map layers in memory so re-opening the panel restores them.
       setPreviewMode("report");
     }
@@ -2430,8 +2478,9 @@
         }
         messages.removeChild(messages.lastElementChild);
         addMessage(renderReportCard(payload), "agent");
-        // Live update: the map panel always reflects the newest task result.
+        // Live update: both right-pane views reflect the newest task result.
         updateResultMap(payload);
+        updateResultReport(payload);
         refreshSessions();
       } catch (error) {
         messages.removeChild(messages.lastElementChild);
