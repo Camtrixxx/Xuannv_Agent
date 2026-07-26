@@ -280,7 +280,12 @@ if (payload.status === "needs_annotation") {
 
 ## 地图图层与叠加显示（重点）
 
-报告的 `analysis.charts[]` 里每张图是一个 `ChartAsset`。除 `title / kind / url / caption` 外，三个字段决定它在地图上如何显示：
+> **变更（v9 报告模板）**：叠图从报告里搬到了**前端的地图面板**。
+> 报告 HTML 不再内嵌 Leaflet 地图，只保留文字、指标、结果图（静态图片）和数据表；
+> 结果上图由前端自己的地图面板负责。推荐的接法见下面「右侧双视图：报告 ⇄ 地图」。
+> **接口字段没有变化**，`overlay / bounds_wgs84 / patch_id` 照旧，下表不变。
+
+`analysis.charts[]` 里每张图是一个 `ChartAsset`。除 `title / kind / url / caption` 外，三个字段决定它在地图上如何显示：
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
@@ -293,6 +298,18 @@ if (payload.status === "needs_annotation") {
 - **底图**（`卫星影像（框选区域）`）：`overlay=false`、`bounds_wgs84=[]`。作报告首图/地图底衬，不参与叠加。
 - **结果图层**（`overlay=true`）：用 `bounds_wgs84` 作为 image overlay 的地理范围，把 `url` 图片铺到地图上，可叠在底图之上并支持透明度。
 - **不必区分"一张拼接图"还是"多张逐 patch 图"**：后端能拼就拼成一张大图层（`bounds_wgs84` 为并集），拼不了就回退多张（各带自己的 `bounds_wgs84`）。前端只需遍历 `charts`、对 `overlay=true` 的逐张铺图。
+- **坐标系必须对齐**：`bounds_wgs84` 是 WGS84。底图若用高德/腾讯瓦片（GCJ-02），要先把边界做 WGS84→GCJ-02 转换，否则整层偏移约 500m。用天地图/Esri 等 WGS84 底图可直接叠。
+- **每次任务先清旧层**：图层是"替换"语义，不是"累加"。新任务的结果铺上去之前先移除上一次的 overlay。
+- **懒初始化地图**：地图容器隐藏时初始化会拿到 0 尺寸、渲染成白块。首次切到地图视图时再建实例，切回来时调一次 `invalidateSize()`。
+
+### 右侧双视图：报告 ⇄ 地图
+
+推荐的页面结构（`agent/ui/agent_dashboard_mock.html` 已按此实现，可直接参考）：
+
+- 右侧面板一个容器、两个视图：`报告` 和 `地图`，用顶部分段按钮互相切换（同一块区域切换，不并排）。
+- 聊天里的报告卡片给两个入口：`打开完整 HTML 报告`（进报告视图）和 `在地图上查看结果`（进地图视图）。
+- 地图视图底部放图层控制：透明度滑块、逐图层开关、底图切换、`回到结果范围`。
+- **实时更新**：每次 `/api/report` 返回 `status=ok` 后调一次 `updateMapPanel(payload)`。地图视图正在显示就原地换层并重新 `fitBounds`；用户正在看报告，就在`地图`按钮上打一个小圆点提示"图层已更新"。不需要 WebSocket，重渲染即可。
 
 ### 各任务/场景的图层
 
@@ -307,18 +324,34 @@ if (payload.status === "needs_annotation") {
 
 ```js
 const BASE = "http://112.111.7.74:1112";
+let overlays = [];
 
-function renderCharts(analysis, map) {
-  for (const c of analysis.charts || []) {
-    const src = BASE + c.url;
-    if (c.overlay && Array.isArray(c.bounds_wgs84) && c.bounds_wgs84.length === 4) {
-      const [minLng, minLat, maxLng, maxLat] = c.bounds_wgs84;
-      // 多数地图库用 [lat, lng] 顺序，注意翻转
-      map.addImageOverlay(src, [[minLat, minLng], [maxLat, maxLng]], { title: c.title, opacity: 0.75 });
-    } else {
-      appendInlineImage(src, c.caption); // 底图 / 非叠加图
-    }
+// 每次 /api/report 返回 status=ok 后调用一次
+function updateMapPanel(payload, map) {
+  const charts = (payload.analysis || {}).charts || [];
+  const layers = charts.filter(
+    (c) => c.overlay && Array.isArray(c.bounds_wgs84) && c.bounds_wgs84.length === 4 && c.url
+  );
+
+  overlays.forEach((o) => map.removeLayer(o));   // 图层是替换语义
+  overlays = [];
+
+  const corners = [];
+  for (const c of layers) {
+    const [minLng, minLat, maxLng, maxLat] = c.bounds_wgs84;
+    // 高德/腾讯底图先转 GCJ-02；WGS84 底图直接用原值
+    const sw = toBasemapCRS(minLng, minLat);
+    const ne = toBasemapCRS(maxLng, maxLat);
+    // 多数地图库用 [lat, lng] 顺序，注意翻转
+    corners.push([sw[1], sw[0]], [ne[1], ne[0]]);
+    overlays.push(
+      map.addImageOverlay(BASE + c.url, [[sw[1], sw[0]], [ne[1], ne[0]]], {
+        title: c.title || c.patch_id,
+        opacity: 0.7
+      })
+    );
   }
+  if (corners.length) map.fitBounds(corners);
 }
 ```
 
@@ -465,7 +498,9 @@ async function sendReport({sessionId, region, task, prompt, selectedPatchIds, se
 - 多 patch 报告能展示合计指标、每个 patch 的处理状态和多个地图图层。
 - `status=needs_input` 时不弹错误，只展示补充提示。
 - `status=needs_annotation` 时展示引导按钮，点击能用 `action.url` 打开标注页；用户回来说"标注好了"能在同一会话恢复。
-- 报告图层：`overlay=true` 的图能用 `bounds_wgs84` 叠到地图，`overlay=false` 的底图正常内嵌。
+- 结果图层：`overlay=true` 的图能在**地图面板**上用 `bounds_wgs84` 叠出来（与底图对齐、无偏移），`overlay=false` 的底图/图表正常内嵌在报告里。
+- 右侧面板能在`报告`与`地图`之间来回切换，切换后地图不出白块。
+- 连续跑两个任务，地图面板显示的是**最新**任务的图层（旧层已清除）。
 - `status=chat` 时只展示文本回复。
 - `status=ok` 时展示报告卡片、图片、HTML 预览和 Markdown 入口。
 - 历史会话列表可恢复上一轮消息和报告。

@@ -568,6 +568,116 @@
       background: #f8fafc;
     }
 
+    /* The right pane holds two views (report / map); only one is shown at a time. */
+    .preview-view {
+      display: none;
+      height: 100%;
+      min-height: 0;
+    }
+
+    .preview-view.active {
+      display: block;
+    }
+
+    #previewMap.active {
+      display: grid;
+      grid-template-rows: minmax(0, 1fr) auto;
+      background: #fff;
+    }
+
+    .preview-switch {
+      display: inline-flex;
+      padding: 3px;
+      gap: 2px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: #f1f5f9;
+    }
+
+    .preview-switch button {
+      position: relative;
+      height: 28px;
+      padding: 0 12px;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: #64748b;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .preview-switch button.active {
+      background: #fff;
+      color: var(--primary);
+      box-shadow: 0 1px 3px rgba(15, 23, 42, .12);
+    }
+
+    /* Dot on the 地图 tab when a newer task result has arrived unseen. */
+    .preview-switch button.has-update::after {
+      content: "";
+      position: absolute;
+      top: 4px;
+      right: 5px;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #f97316;
+    }
+
+    #resultMap {
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+      background: #dbe6de;
+    }
+
+    .result-map-empty {
+      display: grid;
+      place-items: center;
+      height: 100%;
+      padding: 24px;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+      line-height: 1.9;
+    }
+
+    .result-map-controls {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-top: 1px solid var(--line);
+      background: #fff;
+      color: var(--muted);
+      font-size: 12.5px;
+      white-space: nowrap;
+    }
+
+    .result-map-controls input[type="range"] {
+      flex: 1;
+      min-width: 60px;
+    }
+
+    .result-map-controls button {
+      height: 28px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: #f8fafc;
+      color: #334155;
+      font-size: 12.5px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .result-map-controls button:hover {
+      background: #eef2f7;
+      border-color: #cbd5e1;
+    }
+
     .preview-frame {
       width: 100%;
       height: 100%;
@@ -1188,20 +1298,35 @@
         </footer>
       </div>
 
-      <aside class="preview-pane" id="previewPane" aria-label="报告预览">
+      <aside class="preview-pane" id="previewPane" aria-label="报告与地图">
         <div class="preview-head">
           <div class="preview-title">
             <strong id="previewTitle">报告预览</strong>
             <span id="previewMeta">HTML / Markdown</span>
           </div>
           <div class="preview-actions">
+            <div class="preview-switch" role="tablist" aria-label="切换报告与地图">
+              <button id="switchReport" type="button" class="active" role="tab" aria-selected="true">报告</button>
+              <button id="switchMap" type="button" role="tab" aria-selected="false">地图</button>
+            </div>
             <a id="previewOpenRaw" href="#" target="_blank" rel="noreferrer">新标签</a>
             <button class="preview-toggle" id="toggleMarkdownRaw" type="button">原文</button>
             <button class="preview-close" id="closePreview" type="button" aria-label="关闭预览">×</button>
           </div>
         </div>
-        <div class="preview-body" id="previewBody">
-          <div class="preview-empty">点击报告链接后在这里查看内容。</div>
+        <div class="preview-body">
+          <div class="preview-view active" id="previewReport">
+            <div class="preview-empty">点击报告链接后在这里查看内容。</div>
+          </div>
+          <div class="preview-view" id="previewMap">
+            <div id="resultMap"></div>
+            <div class="result-map-controls" id="resultMapControls">
+              <span>结果透明度</span>
+              <input type="range" min="0" max="100" value="70" id="mapOpacity" aria-label="结果图层透明度" />
+              <span id="mapOpacityVal">70%</span>
+              <button id="mapFitBounds" type="button">回到结果范围</button>
+            </div>
+          </div>
         </div>
       </aside>
     </div>
@@ -1295,10 +1420,23 @@
     const confirmPatchSelection = document.getElementById("confirmPatchSelection");
     const previewTitle = document.getElementById("previewTitle");
     const previewMeta = document.getElementById("previewMeta");
-    const previewBody = document.getElementById("previewBody");
+    const previewBody = document.getElementById("previewReport");
+    const previewMapView = document.getElementById("previewMap");
     const previewOpenRaw = document.getElementById("previewOpenRaw");
     const toggleMarkdownRaw = document.getElementById("toggleMarkdownRaw");
+    const switchReportBtn = document.getElementById("switchReport");
+    const switchMapBtn = document.getElementById("switchMap");
     let currentMarkdownPreview = null;
+    // Right-pane view: "report" | "map". The result map is a separate Leaflet
+    // instance from the area-selection map in the modal — different jobs.
+    let previewMode = "report";
+    let resultMap = null;
+    let resultMapBase = null;
+    let resultMapLabels = null;
+    let resultLayers = [];
+    let resultLayerControl = null;
+    let resultMapBounds = null;
+    let pendingMapLayers = [];
     let leafletMap = null;
     let selectingMap = false;
     let selectStartLatLng = null;
@@ -1868,6 +2006,10 @@
           <figcaption>${escapeHtml(chart.caption)}</figcaption>
         </figure>
       `).join("");
+      const layerCount = extractMapLayers(payload).length;
+      const mapLink = layerCount
+        ? `<a href="#" data-open-map="1">在地图上查看结果（${layerCount} 个图层）</a>`
+        : "";
       return `
         <div class="report-card">
           <h2>${escapeHtml(report.title)}</h2>
@@ -1888,6 +2030,7 @@
           <div class="report-links">
             <a href="${escapeHtml(report.html_url)}" data-preview-url="${escapeHtml(report.html_url)}" data-preview-type="html" data-preview-title="${escapeHtml(report.title)}">打开完整 HTML 报告</a>
             <a href="${escapeHtml(report.markdown_url)}" data-preview-url="${escapeHtml(report.markdown_url)}" data-preview-type="markdown" data-preview-title="${escapeHtml(report.title)}">查看 Markdown</a>
+            ${mapLink}
           </div>
         </div>
       `;
@@ -1986,8 +2129,185 @@
       }
     }
 
+    // ---------------------------------------------------------------- 结果地图
+    // 高德瓦片是 GCJ-02（火星坐标系），结果图的 bounds_wgs84 是 WGS84。二者直接
+    // 叠加会有 ~500m 偏移，所以先把 WGS84 边界转成 GCJ-02 再铺图，与底图对齐。
+    const GCJ_A = 6378245.0;
+    const GCJ_EE = 0.00669342162296594323;
+
+    function gcjTLat(x, y) {
+      let r = -100 + 2 * x + 3 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+      r += (20 * Math.sin(6 * x * Math.PI) + 20 * Math.sin(2 * x * Math.PI)) * 2 / 3;
+      r += (20 * Math.sin(y * Math.PI) + 40 * Math.sin(y / 3 * Math.PI)) * 2 / 3;
+      r += (160 * Math.sin(y / 12 * Math.PI) + 320 * Math.sin(y * Math.PI / 30)) * 2 / 3;
+      return r;
+    }
+
+    function gcjTLng(x, y) {
+      let r = 300 + x + 2 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+      r += (20 * Math.sin(6 * x * Math.PI) + 20 * Math.sin(2 * x * Math.PI)) * 2 / 3;
+      r += (20 * Math.sin(x * Math.PI) + 40 * Math.sin(x / 3 * Math.PI)) * 2 / 3;
+      r += (150 * Math.sin(x / 12 * Math.PI) + 300 * Math.sin(x / 30 * Math.PI)) * 2 / 3;
+      return r;
+    }
+
+    function wgs2gcj(lng, lat) {
+      let dLat = gcjTLat(lng - 105, lat - 35);
+      let dLng = gcjTLng(lng - 105, lat - 35);
+      const rad = lat / 180 * Math.PI;
+      const s = Math.sin(rad);
+      const m = 1 - GCJ_EE * s * s;
+      const sm = Math.sqrt(m);
+      dLat = (dLat * 180) / ((GCJ_A * (1 - GCJ_EE)) / (m * sm) * Math.PI);
+      dLng = (dLng * 180) / (GCJ_A / sm * Math.cos(rad) * Math.PI);
+      return [lng + dLng, lat + dLat];
+    }
+
+    // Pull the map-ready layers out of an /api/report response: charts flagged
+    // overlay=true with valid WGS84 bounds. Everything else stays report-only.
+    function extractMapLayers(payload) {
+      const charts = ((payload || {}).analysis || {}).charts || [];
+      return charts
+        .filter((c) => c && c.overlay && Array.isArray(c.bounds_wgs84) && c.bounds_wgs84.length === 4 && c.url)
+        .map((c, index) => ({
+          url: c.url,
+          bounds: c.bounds_wgs84.map(Number),
+          title: c.title || c.patch_id || `专题结果 ${index + 1}`
+        }));
+    }
+
+    function initResultMap() {
+      if (resultMap || !window.L) {
+        return resultMap;
+      }
+      resultMap = L.map("resultMap", {zoomControl: true, attributionControl: false})
+        .setView([39.99, 116.31], 12);
+      resultMapBase = L.tileLayer(
+        "https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}",
+        {subdomains: ["1", "2", "3", "4"], maxZoom: 19}
+      ).addTo(resultMap);
+      resultMapLabels = L.tileLayer(
+        "https://webst0{s}.is.autonavi.com/appmaptile?style=8&x={x}&y={y}&z={z}",
+        {subdomains: ["1", "2", "3", "4"], maxZoom: 19}
+      );
+      return resultMap;
+    }
+
+    function currentMapOpacity() {
+      const slider = document.getElementById("mapOpacity");
+      return slider ? Number(slider.value) / 100 : 0.7;
+    }
+
+    // Replace the map's result layers in place. Called on every task result, so
+    // the panel always shows the newest run rather than accumulating layers.
+    function setMapLayers(layers) {
+      pendingMapLayers = layers || [];
+      if (!resultMap) {
+        renderMapPlaceholder();
+        return;
+      }
+      resultLayers.forEach((entry) => resultMap.removeLayer(entry.layer));
+      resultLayers = [];
+      if (resultLayerControl) {
+        resultMap.removeControl(resultLayerControl);
+        resultLayerControl = null;
+      }
+      const opacity = currentMapOpacity();
+      const corners = [];
+      pendingMapLayers.forEach((item) => {
+        const sw = wgs2gcj(item.bounds[0], item.bounds[1]);
+        const ne = wgs2gcj(item.bounds[2], item.bounds[3]);
+        const latLngBounds = [[sw[1], sw[0]], [ne[1], ne[0]]];
+        corners.push(latLngBounds[0], latLngBounds[1]);
+        const layer = L.imageOverlay(item.url, latLngBounds, {opacity, interactive: false});
+        layer.addTo(resultMap);
+        resultLayers.push({name: item.title, layer});
+      });
+      if (corners.length) {
+        resultMapBounds = corners;
+        // Size first: a stale 0-height container makes fitBounds pick the wrong zoom.
+        resultMap.invalidateSize();
+        resultMap.fitBounds(corners);
+        const overlayControl = {};
+        resultLayers.forEach((entry) => {
+          overlayControl[entry.name] = entry.layer;
+        });
+        overlayControl["道路注记"] = resultMapLabels;
+        resultLayerControl = L.control
+          .layers({"卫星影像": resultMapBase}, overlayControl, {position: "topright", collapsed: true})
+          .addTo(resultMap);
+      }
+      renderMapPlaceholder();
+      setTimeout(() => resultMap.invalidateSize(), 60);
+    }
+
+    function renderMapPlaceholder() {
+      const controls = document.getElementById("resultMapControls");
+      const holder = document.getElementById("resultMap");
+      const empty = !pendingMapLayers.length;
+      if (controls) {
+        controls.style.display = empty ? "none" : "flex";
+      }
+      if (holder) {
+        holder.style.display = empty ? "none" : "block";
+      }
+      let note = document.getElementById("resultMapEmpty");
+      if (empty) {
+        if (!note) {
+          note = document.createElement("div");
+          note.id = "resultMapEmpty";
+          note.className = "result-map-empty";
+          previewMapView.insertBefore(note, previewMapView.firstChild);
+        }
+        note.textContent = "这次任务还没有可叠加到地图的结果图层。生成一份带地理配准结果的报告后，图层会自动出现在这里。";
+      } else if (note) {
+        note.remove();
+      }
+    }
+
+    // Live update hook: called after every successful task so the map panel
+    // reflects the newest result. Re-renders from the response; no push channel.
+    function updateResultMap(payload) {
+      const layers = extractMapLayers(payload);
+      setMapLayers(layers);
+      if (layers.length && previewMode !== "map") {
+        switchMapBtn.classList.add("has-update");
+      }
+    }
+
+    function setPreviewMode(mode) {
+      previewMode = mode === "map" ? "map" : "report";
+      const isMap = previewMode === "map";
+      switchMapBtn.classList.toggle("active", isMap);
+      switchReportBtn.classList.toggle("active", !isMap);
+      switchMapBtn.setAttribute("aria-selected", String(isMap));
+      switchReportBtn.setAttribute("aria-selected", String(!isMap));
+      previewMapView.classList.toggle("active", isMap);
+      previewBody.classList.toggle("active", !isMap);
+      previewMeta.style.display = isMap ? "none" : "";
+      previewOpenRaw.style.display = isMap ? "none" : "";
+      if (isMap) {
+        switchMapBtn.classList.remove("has-update");
+        previewTitle.textContent = "结果地图";
+        toggleMarkdownRaw.style.display = "none";
+        // Init lazily: a Leaflet map built while its container is hidden has no
+        // size and renders blank tiles.
+        initResultMap();
+        setMapLayers(pendingMapLayers);
+      } else {
+        previewTitle.textContent = currentMarkdownPreview ? currentMarkdownPreview.title : "报告预览";
+        toggleMarkdownRaw.style.display = currentMarkdownPreview ? "inline-grid" : "none";
+      }
+    }
+
+    function openMapPanel() {
+      app.classList.add("preview-open");
+      setPreviewMode("map");
+    }
+
     async function openPreview(url, type, title) {
       app.classList.add("preview-open");
+      setPreviewMode("report");
       previewTitle.textContent = title || "报告预览";
       previewMeta.textContent = type === "markdown" ? "Markdown 预览" : "HTML";
       previewOpenRaw.href = url;
@@ -2014,6 +2334,8 @@
       previewOpenRaw.href = "#";
       toggleMarkdownRaw.style.display = "none";
       currentMarkdownPreview = null;
+      // Keep the map layers in memory so re-opening the panel restores them.
+      setPreviewMode("report");
     }
 
     function updateMemoryStrip(payload) {
@@ -2108,6 +2430,8 @@
         }
         messages.removeChild(messages.lastElementChild);
         addMessage(renderReportCard(payload), "agent");
+        // Live update: the map panel always reflects the newest task result.
+        updateResultMap(payload);
         refreshSessions();
       } catch (error) {
         messages.removeChild(messages.lastElementChild);
@@ -2217,11 +2541,30 @@
     });
 
     messages.addEventListener("click", (event) => {
+      const mapLink = event.target.closest("[data-open-map]");
+      if (mapLink) {
+        event.preventDefault();
+        openMapPanel();
+        return;
+      }
       const previewLink = event.target.closest("[data-preview-url]");
       if (previewLink) {
         event.preventDefault();
         openPreview(previewLink.dataset.previewUrl, previewLink.dataset.previewType, previewLink.dataset.previewTitle);
         return;
+      }
+    });
+
+    switchReportBtn.addEventListener("click", () => setPreviewMode("report"));
+    switchMapBtn.addEventListener("click", () => setPreviewMode("map"));
+    document.getElementById("mapOpacity").addEventListener("input", (event) => {
+      const value = Number(event.target.value);
+      document.getElementById("mapOpacityVal").textContent = `${value}%`;
+      resultLayers.forEach((entry) => entry.layer.setOpacity(value / 100));
+    });
+    document.getElementById("mapFitBounds").addEventListener("click", () => {
+      if (resultMap && resultMapBounds) {
+        resultMap.fitBounds(resultMapBounds);
       }
     });
 
@@ -2242,6 +2585,7 @@
     });
 
     renderTaskTags(currentTask);
+    setPreviewMode("report");
     updateMapLabel();
     updateMemoryStrip({status: "idle", session_id: sessionId, memory: {pending_slots: []}});
     refreshSessions();

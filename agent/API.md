@@ -282,6 +282,11 @@ Agent 只有在用户**明确请求生成报告**时才会生成报告；提问�
 
 ### 地图图层与叠加显示（重点）
 
+> **变更（v9 报告模板）**：叠图现在是**前端地图面板**的职责，不再内嵌在报告里。
+> 生成的报告 HTML 已移除内置 Leaflet 地图，只保留文字、指标、结果图（静态）与数据表。
+> 前端应把叠加图层渲染在自己的地图面板上（推荐做成右侧面板，与报告预览用一个按钮互相切换），
+> 每次任务返回后用新响应重渲染，实现"结果实时上图"。字段契约未变，下表照旧。
+
 `analysis.charts[]` 里的每张图都是一个 `ChartAsset`。除了 `title / kind / url / caption`，图层相关的三个字段决定它在地图上如何显示：
 
 | 字段 | 类型 | 含义 |
@@ -294,6 +299,8 @@ Agent 只有在用户**明确请求生成报告**时才会生成报告；提问�
 
 - **底图**（`卫星影像（框选区域）`）：`overlay=false`、`bounds_wgs84=[]`。作为报告首图或地图底衬展示，不参与图层叠加。
 - **结果图层**（`overlay=true`）：用 `bounds_wgs84` 作为 image overlay 的地理范围铺到地图上，`url` 为图片地址（拼 `AGENT_BASE_URL`）。图层可与底图叠加，支持透明度调节。
+- **坐标系**：`bounds_wgs84` 是 **WGS84**。若底图用高德/腾讯瓦片（GCJ-02），必须先把边界做 WGS84→GCJ-02 转换再叠加，否则会有约 500m 偏移。用天地图/Esri 等 WGS84 底图则可直接叠。
+- **图层替换而非累加**：新任务返回后应先清掉上一次的 overlay 再铺新层，否则多次任务的结果会互相压盖。
 - **一图 or 多图**：多 patch 选区会优先在后端拼接成**一张无缝大图层**（标题形如 `建筑物提取专题结果（N patch 拼接）`，`bounds_wgs84` 为各 patch 的并集，`patch_id` 为逗号分隔全集）；当 patch 选区不连续、分辨率不一致或拼接失败时，回退为**逐 patch 多张图层**（每张各带自己的 `bounds_wgs84` 和单个 `patch_id`）。两种情况前端处理方式一致：遍历 `charts`，对 `overlay=true` 的逐张铺图即可，无需区分拼接与否。
 
 不同任务/场景的图层类型：
@@ -330,17 +337,31 @@ Agent 只有在用户**明确请求生成报告**时才会生成报告；提问�
 ]
 ```
 
-最小叠图逻辑（伪代码）：
+最小叠图逻辑（伪代码，每次 `/api/report` 返回后调用一次）：
 
 ```js
 const BASE = "http://112.111.7.74:1112";
-for (const c of analysis.charts) {
-  if (c.overlay && c.bounds_wgs84?.length === 4) {
+
+function updateMapPanel(payload) {
+  const charts = payload.analysis?.charts || [];
+  const layers = charts.filter(
+    (c) => c.overlay && c.bounds_wgs84?.length === 4 && c.url
+  );
+  clearOverlays();                       // 先清旧层，避免多次任务叠在一起
+  const corners = [];
+  for (const c of layers) {
     const [minLng, minLat, maxLng, maxLat] = c.bounds_wgs84;
-    addImageOverlay(BASE + c.url, [[minLat, minLng], [maxLat, maxLng]]); // 注意地图库多用 [lat,lng]
-  } else {
-    showInlineImage(BASE + c.url); // 底图 / 非叠加图
+    // 高德/腾讯底图需先转 GCJ-02；WGS84 底图可直接用原值
+    const sw = toBasemapCRS(minLng, minLat);
+    const ne = toBasemapCRS(maxLng, maxLat);
+    corners.push(sw, ne);
+    addImageOverlay(BASE + c.url, [sw, ne], {
+      opacity: 0.7,
+      name: c.title || c.patch_id      // 供图层开关显示
+    });
   }
+  if (corners.length) fitBounds(corners);
+  // 非叠加图（底图、图表）仍按普通图片展示
 }
 ```
 

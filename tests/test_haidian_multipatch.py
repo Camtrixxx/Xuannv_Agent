@@ -112,7 +112,10 @@ def test_one_failed_patch_is_reported_without_losing_successes(monkeypatch, tmp_
     assert failed_rows[0]["patch_id"] == "p2"
 
 
-def test_report_map_contains_all_patch_layers(tmp_path):
+def test_report_html_has_no_embedded_map(tmp_path):
+    """The on-map overlay module moved out of the report into the frontend's
+    right-side map panel, so the report HTML must no longer embed a Leaflet map.
+    The per-patch result images stay as static figures."""
     analysis = AnalysisResult(
         task="建筑物提取",
         region="北京市海淀区",
@@ -127,7 +130,37 @@ def test_report_map_contains_all_patch_layers(tmp_path):
             ChartAsset("p2", "image", "/reports/assets/p2.png", "p2", [116.21, 39.9, 116.22, 39.91], True, "p2"),
         ],
     )
-    section, _, script = ReportService(config=ReportConfig(report_dir=tmp_path, asset_dir=tmp_path))._result_map_html(analysis)
-    assert "地图包含 2 个结果图层" in section
-    assert '"title": "p1"' in script
-    assert '"title": "p2"' in script
+    service = ReportService(config=ReportConfig(report_dir=tmp_path, asset_dir=tmp_path))
+    assert not hasattr(service, "_result_map_html")
+    page = service._render_html(
+        "海淀建筑物提取",
+        {"summary": "s", "highlights": [], "analysis": [], "recommendations": []},
+        analysis,
+        analysis.metrics,
+    )
+    for marker in ("resultMap", "leaflet", "L.imageOverlay", "在地图上查看结果", "mapOpacity"):
+        assert marker not in page, marker
+    # The result images themselves are still shown inline.
+    assert "/reports/assets/p1.png" in page
+    assert "/reports/assets/p2.png" in page
+
+
+def test_overlay_metadata_survives_for_the_map_panel(tmp_path, monkeypatch):
+    """The frontend map panel is driven by charts[].overlay + bounds_wgs84, so
+    those fields must keep flowing out of the analysis service unchanged."""
+    patches = [_patch("p1", 116.20), _patch("p2", 116.21)]
+    service = _service(monkeypatch, tmp_path, patches)
+    result = service.analyze(
+        ReportRequest(
+            task="建筑物提取",
+            region="北京市海淀区",
+            prompt="海淀2025年12月建筑物提取",
+            time_range="2025-12",
+            selected_patch_ids=["p1", "p2"],
+        )
+    )
+    layers = [c for c in result.charts if c.overlay]
+    assert layers, "expected at least one map-ready overlay layer"
+    for chart in layers:
+        assert len(chart.bounds_wgs84) == 4
+        assert chart.url
