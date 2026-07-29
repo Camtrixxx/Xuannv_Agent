@@ -287,7 +287,17 @@ Agent 只有在用户**明确请求生成报告**时才会生成报告；提问�
 
 前端可像报告页一样直接打开或放入 iframe。该页面已经包含高德卫星底图、WGS84→GCJ-02
 坐标转换、结果图层开关、透明度控制和结果范围自动定位。URL 是相对路径，需拼接
-`AGENT_BASE_URL`。若本次没有可上图结果，`map_html_url` 为空字符串。
+`AGENT_BASE_URL`。
+
+两个边界，前端按字段判断即可，不要写死：
+
+- **只有海淀任务会生成这个页面。** 其他地区（雅江、哈尔滨新区）返回 `map_html_url: ""`，
+  因为目前只有海淀链路产出带 `bounds_wgs84` 的地理配准结果。
+- 海淀任务若本次没有可上图的结果图层，同样返回 `""`。
+
+即：`map_html_url` 非空才显示"在地图中显示"入口，为空就隐藏。这个页面是静态产物，
+**不接受任何 query 参数**（透明度、图层开关都是页面内部交互）。需要把结果叠进前端自有
+地图、或想自己控制交互，走下面 `charts[]` 的 `overlay / bounds_wgs84 / patch_id` 字段。
 
 说明：
 
@@ -584,19 +594,42 @@ absolute_image_url = AGENT_BASE_URL + response.analysis.charts[0].url
 
 响应示例结构：
 
+> 注意：`messages` 和 `reports` 都在 **`memory`** 下，`session` 里没有这两个字段。
+
 ```json
 {
   "status": "ok",
   "session": {
     "session_id": "frontend-session-001",
-    "messages": [],
-    "reports": []
+    "title": "北京市海淀区 水体提取 2025-12",
+    "summary": "最近一次报告任务：北京市海淀区，水体提取，2025-12。",
+    "mode": "ok",
+    "turn_count": 4,
+    "last_user_message": "给我一份2025年12月水体提取报告",
+    "last_agent_message": "报告已生成。",
+    "current_intent": {"task": "水体提取", "region": "北京市海淀区", "time_range": "2025-12"},
+    "task": "水体提取",
+    "region": "北京市海淀区",
+    "time_range": "2025-12",
+    "created_at": "2026-07-26T06:30:00+00:00",
+    "updated_at": "2026-07-26T06:32:10+00:00"
   },
   "memory": {
     "current_intent": {},
     "pending_slots": [],
-    "recent_messages": [],
-    "reports": []
+    "recent_messages": [{"role": "user", "content": "...", "created_at": "..."}],
+    "reports": [
+      {
+        "title": "北京市海淀区水体提取报告",
+        "html_url": "/reports/2025-12-haidian-xxxx.html",
+        "markdown_url": "/reports/2025-12-haidian-xxxx.md",
+        "map_html_url": "/reports/2025-12-haidian-xxxx.map.html",
+        "request": {},
+        "created_at": "2026-07-26T06:32:10+00:00"
+      }
+    ],
+    "report_context": {},
+    "pending_custom_model": {}
   }
 }
 ```
@@ -649,9 +682,13 @@ absolute_image_url = AGENT_BASE_URL + response.analysis.charts[0].url
 3. 把 `message` 渲染为助手回复。
 4. 当 `status=ok && report` 时，渲染报告卡片。
 5. 点击报告卡片时，在右侧面板加载 `AGENT_BASE_URL + report.html_url`。
-6. “查看地图”加载 `AGENT_BASE_URL + report.map_html_url`；字段为空时隐藏入口。
+6. “在地图中显示”加载 `AGENT_BASE_URL + report.map_html_url`；字段为空时隐藏入口。
 7. Markdown 按钮加载 `AGENT_BASE_URL + report.markdown_url`。
-8. 左侧历史会话调用 `GET /api/sessions` 和 `GET /api/session/{session_id}`；历史报告同样返回 `map_html_url`。
+8. **两个视图都按响应实时更新**：每次 `status=ok` 后，报告视图换成新的 `html_url`，
+   地图视图换成新的 `map_html_url`。当前显示的那个就地更新，另一个排队并在它的切换按钮上
+   打提示点，用户切过去时套用。用户手动点卡片里的链接，优先级高于排队的结果。
+9. 左侧历史会话调用 `GET /api/sessions` 和 `GET /api/session/{session_id}`；历史报告在
+   `memory.reports[]` 里（不在 `session` 下），每条同样带 `map_html_url`，所以历史会话也能还原地图。
 
 ## Curl 示例
 
