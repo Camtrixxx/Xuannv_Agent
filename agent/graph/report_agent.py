@@ -253,12 +253,22 @@ class ReportAgent:
             missing.append("task")
         if not intent.time_range:
             missing.append("time_range")
+        if not self._has_analysis_area(state["request"], intent.region, memory):
+            missing.append("aoi")
         intent.missing_fields = missing
         intent.confirmation_fields = []
 
         if missing:
             state["status"] = AgentStatus.NEEDS_INPUT
-            state["message"] = self._clarify_message(missing, intent.region)
+            ordinary_missing = [field for field in missing if field != "aoi"]
+            if ordinary_missing:
+                state["message"] = self._clarify_message(ordinary_missing, intent.region)
+                if "aoi" in missing:
+                    state["message"] += " 另外，请先在地图上框选要分析的区域。"
+            else:
+                state["message"] = (
+                    "请先在地图上框选要分析的区域并确认 Patch，我会按你选择的范围生成海淀专题报告。"
+                )
             return state
 
         # Pre-validate the month against the region's real coverage so an
@@ -545,6 +555,7 @@ class ReportAgent:
                 "time_range": intent.time_range,
                 "before_time_range": getattr(request, "before_time_range", ""),
                 "after_time_range": getattr(request, "after_time_range", ""),
+                "selected_patch_ids": list(request.selected_patch_ids),
                 "aoi": request.aoi,
             },
         }
@@ -609,6 +620,8 @@ class ReportAgent:
             request.before_time_range = saved.get("before_time_range") or ""
         if not getattr(request, "after_time_range", ""):
             request.after_time_range = saved.get("after_time_range") or ""
+        if not request.selected_patch_ids and saved.get("selected_patch_ids"):
+            request.selected_patch_ids = [str(item) for item in saved["selected_patch_ids"] if str(item).strip()]
         if not self._has_bbox(request.aoi) and self._has_bbox(saved.get("aoi")):
             request.aoi = saved.get("aoi")
         state.setdefault("debug", {})["resumed_custom_model"] = cap.model_id
@@ -624,6 +637,13 @@ class ReportAgent:
             intent.missing_fields = ["time_range"]
             state["status"] = AgentStatus.NEEDS_INPUT
             state["message"] = f"『{cap.class_name}』模型已就绪。请补充要分析的月份。"
+            return state
+        if not self._has_analysis_area(request, intent.region, memory):
+            intent.missing_fields = ["aoi"]
+            state["status"] = AgentStatus.NEEDS_INPUT
+            state["message"] = (
+                f"『{cap.class_name}』模型已就绪。请先在地图上框选要分析的区域并确认 Patch。"
+            )
             return state
         state["status"] = AgentStatus.OK
         state["message"] = f"『{cap.class_name}』模型已就绪，正在生成分析。"
@@ -840,16 +860,17 @@ class ReportAgent:
             state["analysis"] = self.analysis_service.analyze(normalized_request)
             return state
         except Exception as exc:
-            # An inherited patch may not support the new task — fall back to a fresh
-            # pick so the user still gets a report (just on a suitable patch).
+            # Never leave the user's previous area and silently pick patches from
+            # elsewhere in Haidian. Ask for a new map selection instead.
             if inherited_patch:
-                try:
-                    normalized_request = _request([])
-                    state["request"] = normalized_request
-                    state["analysis"] = self.analysis_service.analyze(normalized_request)
-                    return state
-                except Exception as exc2:
-                    exc = exc2
+                state["analysis"] = None
+                state["status"] = AgentStatus.NEEDS_INPUT
+                intent.missing_fields = ["aoi"]
+                state["message"] = (
+                    "上一次选择的 Patch 不支持当前任务或月份，请在地图上重新框选分析区域。"
+                )
+                state.setdefault("debug", {})["analysis_error"] = str(exc)
+                return state
             state["analysis"] = None
             state["status"] = AgentStatus.NEEDS_INPUT
             state["message"] = (
@@ -942,6 +963,16 @@ class ReportAgent:
             and isinstance(aoi.get("coordinates"), list)
             and len(aoi["coordinates"]) == 4
         )
+
+    def _has_analysis_area(self, request: ReportRequest, region: str, memory: dict[str, Any]) -> bool:
+        """Haidian requires an explicit or previously confirmed map selection."""
+        region_text = str(region or "")
+        if "海淀" not in region_text and region_text.lower() not in {"haidian", "beijing_haidian"}:
+            return True
+        if request.selected_patch_ids or self._has_bbox(request.aoi):
+            return True
+        context = (memory or {}).get("report_context") or {}
+        return context.get("region") == region and bool(context.get("used_patch_ids"))
 
     @staticmethod
     def _used_patch_ids(analysis: Any) -> list[str]:

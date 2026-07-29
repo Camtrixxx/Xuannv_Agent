@@ -53,6 +53,7 @@ class _StubAnalysis:
         return AnalysisResult(
             task=request.task or "分析", region=request.region, time_range=request.time_range,
             headline="stub", summary="stub", metrics=[], findings=[], recommendations=[],
+            aef_payload={"used_patch_ids": list(request.selected_patch_ids)},
         )
 
 
@@ -196,22 +197,45 @@ def test_native_task_abandons_pending_custom_model(tmp_path):
 
 
 def test_region_carries_across_turns_ordinary(tmp_path):
-    # Turn 1 establishes 海淀. Turn 2 names a task + month but NO region and NO
-    # frontend selection → must stay 海淀, not fall back to 雅江.
+    # Turn 1 establishes 海淀. Turn 2 names a task + month but has no map
+    # selection: it must keep 海淀 and ask the user to frame an area.
     agent = _agent(tmp_path, {})
     agent.run(_req("分析一下海淀", "sr1"))
     r = agent.run(_req("就看建筑物，2026年3月", "sr1", region=""))
     assert r.intent.region == "北京市海淀区"
-    assert r.status == AgentStatus.OK  # slots complete → analysis ran
+    assert r.status == AgentStatus.NEEDS_INPUT
+    assert r.intent.missing_fields == ["aoi"]
+    assert "框选" in r.message
+
+
+def test_haidian_ordinary_request_accepts_selected_patches(tmp_path):
+    agent = _agent(tmp_path, {})
+    r = agent.run(
+        _req(
+            "海淀2026年3月的建筑物提取",
+            "sr-patch",
+            selected_patch_ids=["patch_000001"],
+        )
+    )
+    assert r.status == AgentStatus.OK
+    assert r.request.selected_patch_ids == ["patch_000001"]
+
+
+def test_haidian_ordinary_request_accepts_aoi(tmp_path):
+    agent = _agent(tmp_path, {})
+    r = agent.run(_req("海淀2026年3月的建筑物提取", "sr-aoi", aoi=AOI))
+    assert r.status == AgentStatus.OK
 
 
 def test_region_carries_when_task_changes(tmp_path):
     # After a 海淀 building report, "换成道路" (no region) stays in 海淀.
     agent = _agent(tmp_path, {})
-    agent.run(_req("海淀2026年3月的建筑物提取", "sr2"))
+    agent.run(_req("海淀2026年3月的建筑物提取", "sr2", selected_patch_ids=["patch_000001"]))
     r = agent.run(_req("算了，还是看看道路吧", "sr2", region=""))
     assert r.intent.region == "北京市海淀区"
     assert r.intent.task == "道路提取"
+    assert r.status == AgentStatus.OK
+    assert r.request.selected_patch_ids == ["patch_000001"]
 
 
 def test_explicit_region_overrides_session(tmp_path):

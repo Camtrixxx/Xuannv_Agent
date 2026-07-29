@@ -148,7 +148,8 @@ Content-Type: application/json
 }
 ```
 
-如果用户没有选 patch，也可以不传 `selected_patch_ids` 和 `aoi`。后端会根据地区、任务、月份自动选择可用 patch。
+海淀报告必须传 `selected_patch_ids`，或传有效的 bbox `aoi` 让后端在框选范围内检索 Patch。
+两者都不传时，接口返回 `status=needs_input` 并提示用户框选区域，不再从海淀全区自动选择 Patch。
 
 ## 响应状态
 

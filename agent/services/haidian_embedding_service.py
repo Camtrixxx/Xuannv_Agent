@@ -42,14 +42,6 @@ TASK_DESCRIPTIONS = {
 BINARY_TASKS = {"building_extraction", "road_extraction", "construction", "water_extraction"}
 
 
-def _stable_pick(items: list[dict[str, Any]], key: str, count: int) -> list[dict[str, Any]]:
-    count = max(1, min(count, len(items)))
-    return sorted(
-        items,
-        key=lambda item: hashlib.sha1(f"{key}:{item.get('patch_id')}".encode("utf-8")).hexdigest(),
-    )[:count]
-
-
 def _api_month(time_range: str) -> str:
     return str(time_range or "").replace("-", "")
 
@@ -259,7 +251,7 @@ class HaidianEmbeddingAnalysisService:
         self, request: ReportRequest, task_id: str, month: str
     ) -> tuple[list[dict[str, Any]], list[str], list[str]]:
         # max_selected_patches <= 0 means "no cap" — honour the whole selection
-        # (both an explicit patch list and an AOI/global search).
+        # (both an explicit patch list and an AOI search).
         configured = int(self.config.max_selected_patches)
         limit = configured if configured > 0 else 1_000_000
         if request.selected_patch_ids:
@@ -283,28 +275,20 @@ class HaidianEmbeddingAnalysisService:
                 f"前端选择的海淀 patch 均不支持 {month} / {task_id}，请重新选择月份、任务或 patch。"
             )
 
+        if not self._aoi_bbox(request.aoi):
+            raise RuntimeError(
+                "海淀分析需要先在地图上框选区域并确认 Patch，不会自动从全区随机选择。"
+            )
+
         aoi_patches = self._select_patches_from_aoi(request, task_id, month, limit)
         if aoi_patches:
             for patch in aoi_patches:
                 patch["_agent_selection_source"] = "aoi_month_task_search"
             return aoi_patches, [], []
 
-        patches = []
-        page = 1
-        while True:
-            payload = self._get_json(f"/regions/haidian/patches?page={page}&page_size=100")
-            for patch in payload.get("patches") or []:
-                if self._is_usable_patch(patch, task_id, month):
-                    patches.append(patch)
-            if not payload.get("has_next"):
-                break
-            page += 1
-        if not patches:
-            raise RuntimeError(f"没有找到支持 {month} / {task_id} 的海淀 patch。")
-        selected = _stable_pick(patches, f"{request.region}-{request.task}-{month}-{task_id}", limit)
-        for patch in selected:
-            patch["_agent_selection_source"] = "global_month_task_search"
-        return selected, [], []
+        raise RuntimeError(
+            f"框选范围内没有支持 {month} / {task_id} 的海淀 Patch，请调整范围、月份或任务。"
+        )
 
     def _select_patch(self, request: ReportRequest, task_id: str, month: str) -> dict[str, Any]:
         """Compatibility helper for callers that still expect one patch."""
@@ -795,7 +779,6 @@ class HaidianEmbeddingAnalysisService:
             "selected_patch_month_task_valid": "前端地图选中的 patch，已通过最终月份和任务校验",
             "aoi_reselected_after_month_task": "前端候选 patch 月份或任务不匹配，已按同一 AOI 和最终条件重选",
             "aoi_month_task_search": "按前端 AOI、最终月份和最终任务选择的 patch",
-            "global_month_task_search": "未提供 AOI 时按地区、月份和任务临时选择的 patch",
         }
         return labels.get(source, "最终条件校验后的 patch")
 

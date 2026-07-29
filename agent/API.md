@@ -183,9 +183,12 @@ Agent 只有在用户**明确请求生成报告**时才会生成报告；提问�
 | `region` | 否 | 前端选择的地区。默认 `雅江区域` |
 | `prompt` | 是 | 用户自然语言输入 |
 | `time_range` | 否 | `YYYY-MM`，前端已知月份时可直接传 |
-| `selected_patch_ids` | 否 | 地图选择得到的 patch ID 列表，例如 `["patch_000020", "patch_000021"]`；海淀普通报告默认最多处理 8 个 |
-| `aoi` | 否 | 地图框选范围，推荐 `{ "type": "bbox", "coordinates": [minLng, minLat, maxLng, maxLat] }` |
+| `selected_patch_ids` | 海淀二选一 | 地图选择得到的 patch ID 列表，例如 `["patch_000020", "patch_000021"]`；与 `aoi` 至少提供一个 |
+| `aoi` | 海淀二选一 | 地图框选范围，推荐 `{ "type": "bbox", "coordinates": [minLng, minLat, maxLng, maxLat] }`；与 `selected_patch_ids` 至少提供一个 |
 | `before_time_range` / `after_time_range` | 否 | 仅建设扰动监测（场景 B）用的两期月份 `YYYY-MM`。前端也可让用户在 `prompt` 里写"2025-12 到 2026-05"由后端抽取 |
+
+海淀普通报告没有 `selected_patch_ids` 且没有有效 `aoi` 时返回 `needs_input`，提示用户先在地图上框选区域；
+后端不会再从海淀全区自动抽取 Patch。已有海淀报告后的换任务或换月份会优先复用上一次成功选区。
 
 ### 海淀复合场景（框选 AOI + 一句话触发）
 

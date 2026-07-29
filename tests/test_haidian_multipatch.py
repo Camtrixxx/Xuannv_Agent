@@ -5,6 +5,7 @@ from __future__ import annotations
 from io import BytesIO
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
 from agent.config import EmbeddingAPIConfig, ReportConfig
@@ -117,6 +118,40 @@ def test_one_failed_patch_is_reported_without_losing_successes(monkeypatch, tmp_
     assert "获取失败" in result.summary
     failed_rows = [row for row in result.patch_results if row["status"] == "failed"]
     assert failed_rows[0]["patch_id"] == "p2"
+
+
+def test_haidian_requires_an_explicit_map_selection(tmp_path):
+    service = HaidianEmbeddingAnalysisService(
+        config=EmbeddingAPIConfig(base_url="http://test"),
+        report_config=ReportConfig(asset_dir=tmp_path),
+    )
+    request = ReportRequest(
+        task="建筑物提取",
+        region="北京市海淀区",
+        prompt="生成海淀建筑物报告",
+        time_range="2026-03",
+    )
+
+    with pytest.raises(RuntimeError, match="框选区域"):
+        service._select_patches(request, "building_extraction", "202603")
+
+
+def test_haidian_empty_aoi_does_not_fall_back_to_global_patches(tmp_path, monkeypatch):
+    service = HaidianEmbeddingAnalysisService(
+        config=EmbeddingAPIConfig(base_url="http://test"),
+        report_config=ReportConfig(asset_dir=tmp_path),
+    )
+    request = ReportRequest(
+        task="建筑物提取",
+        region="北京市海淀区",
+        prompt="分析框选区域",
+        time_range="2026-03",
+        aoi={"type": "bbox", "coordinates": [116.20, 39.88, 116.26, 39.92]},
+    )
+    monkeypatch.setattr(service, "_select_patches_from_aoi", lambda *args: [])
+
+    with pytest.raises(RuntimeError, match="框选范围内没有"):
+        service._select_patches(request, "building_extraction", "202603")
 
 
 def test_report_html_has_no_embedded_map(tmp_path):
