@@ -198,23 +198,34 @@ class MemoryService:
         title: str,
         html_url: str,
         markdown_url: str,
+        map_html_url: str = "",
         request: dict[str, Any],
     ) -> None:
         with self._lock, self._connect() as conn:
             self._ensure_session(conn, session_id)
             conn.execute(
                 """
-                INSERT INTO reports(session_id, title, html_url, markdown_url, request_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO reports(
+                    session_id, title, html_url, markdown_url, map_html_url, request_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (session_id, title, html_url, markdown_url, json.dumps(request, ensure_ascii=False), _now()),
+                (
+                    session_id,
+                    title,
+                    html_url,
+                    markdown_url,
+                    map_html_url,
+                    json.dumps(request, ensure_ascii=False),
+                    _now(),
+                ),
             )
 
     def recent_reports(self, session_id: str, limit: int = 5) -> list[dict[str, Any]]:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT title, html_url, markdown_url, request_json, created_at
+                SELECT title, html_url, markdown_url, map_html_url, request_json, created_at
                 FROM reports WHERE session_id = ?
                 ORDER BY id DESC LIMIT ?
                 """,
@@ -225,6 +236,7 @@ class MemoryService:
                 "title": row["title"],
                 "html_url": row["html_url"],
                 "markdown_url": row["markdown_url"],
+                "map_html_url": row["map_html_url"],
                 "request": self._loads(row["request_json"], {}),
                 "created_at": row["created_at"],
             }
@@ -303,6 +315,7 @@ class MemoryService:
                     title TEXT NOT NULL,
                     html_url TEXT NOT NULL,
                     markdown_url TEXT NOT NULL,
+                    map_html_url TEXT NOT NULL DEFAULT '',
                     request_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
@@ -316,6 +329,9 @@ class MemoryService:
                 conn.execute("ALTER TABLE sessions ADD COLUMN report_context TEXT NOT NULL DEFAULT '{}'")
             if "pending_custom_model" not in columns:
                 conn.execute("ALTER TABLE sessions ADD COLUMN pending_custom_model TEXT NOT NULL DEFAULT '{}'")
+            report_columns = {row["name"] for row in conn.execute("PRAGMA table_info(reports)").fetchall()}
+            if "map_html_url" not in report_columns:
+                conn.execute("ALTER TABLE reports ADD COLUMN map_html_url TEXT NOT NULL DEFAULT ''")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)

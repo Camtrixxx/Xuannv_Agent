@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import hashlib
 import json
+import math
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +15,7 @@ from agent.services.llm_provider import DeepSeekProvider, LLMProvider
 
 
 REPORT_TEMPLATE_VERSION = "agent-report-v9"
+MAP_TEMPLATE_VERSION = "agent-result-map-v1"
 
 # Metric cards that are metadata/plumbing rather than business findings. These are
 # already conveyed by the header chips, so we keep them out of the metric grid.
@@ -57,7 +59,9 @@ class ReportService:
         slug = self._slug(self._report_identity(request, analysis))
         html_path = self.report_dir / f"{slug}.html"
         md_path = self.report_dir / f"{slug}.md"
+        map_path = self.report_dir / f"{slug}.map.html"
         metrics = self._business_metrics(analysis)
+        map_html_url = self._write_map_page(request, analysis, map_path)
 
         if self.config.reuse_existing and self._can_reuse(html_path, md_path):
             abstract = self._read_existing_abstract(md_path) or self._fallback_summary(request, analysis)
@@ -69,6 +73,7 @@ class ReportService:
                 charts=analysis.charts,
                 html_url=f"/reports/{html_path.name}",
                 markdown_url=f"/reports/{md_path.name}",
+                map_html_url=map_html_url,
                 llm_provider="reused",
                 reused=True,
                 generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -91,6 +96,7 @@ class ReportService:
             charts=analysis.charts,
             html_url=f"/reports/{html_path.name}",
             markdown_url=f"/reports/{md_path.name}",
+            map_html_url=map_html_url,
             llm_provider=llm_provider,
             generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             debug={"llm_status": llm_status, "slug": slug},
@@ -460,6 +466,176 @@ class ReportService:
 
     # ------------------------------------------------------------------ helpers
 
+    def _write_map_page(
+        self,
+        request: ReportRequest,
+        analysis: AnalysisResult,
+        map_path: Path,
+    ) -> str:
+        """Write a standalone interactive map for a Haidian analysis result."""
+        if "海淀" not in (analysis.region or request.region):
+            map_path.unlink(missing_ok=True)
+            return ""
+
+        layers = []
+        for chart in analysis.charts:
+            bounds = chart.bounds_wgs84
+            if not chart.overlay or not chart.url or len(bounds) != 4:
+                continue
+            try:
+                numeric_bounds = [float(value) for value in bounds]
+            except (TypeError, ValueError):
+                continue
+            if not all(math.isfinite(value) for value in numeric_bounds):
+                continue
+            min_lng, min_lat, max_lng, max_lat = numeric_bounds
+            if min_lng >= max_lng or min_lat >= max_lat:
+                continue
+            layers.append(
+                {
+                    "title": chart.title or chart.patch_id or f"专题结果 {len(layers) + 1}",
+                    "url": chart.url,
+                    "bounds_wgs84": numeric_bounds,
+                    "patch_ids": [item for item in chart.patch_id.split(",") if item],
+                }
+            )
+
+        if not layers:
+            map_path.unlink(missing_ok=True)
+            return ""
+
+        map_path.write_text(
+            self._render_map_html(request, analysis, layers),
+            encoding="utf-8",
+        )
+        return f"/reports/{map_path.name}"
+
+    def _render_map_html(
+        self,
+        request: ReportRequest,
+        analysis: AnalysisResult,
+        layers: list[dict],
+    ) -> str:
+        payload = json.dumps(layers, ensure_ascii=False).replace("<", "\\u003c")
+        title = f"{analysis.headline}结果地图"
+        meta = " · ".join(
+            item for item in (analysis.region or request.region, analysis.task, analysis.time_range) if item
+        )
+        return f"""<!doctype html>
+<!-- {MAP_TEMPLATE_VERSION} -->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(title)}</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    :root {{ --ink:#18202a; --muted:#667085; --line:#d9dee7; --panel:#fff; --accent:#1769e0; }}
+    * {{ box-sizing:border-box; }}
+    html, body {{ width:100%; height:100%; margin:0; overflow:hidden; color:var(--ink);
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif; }}
+    body {{ display:grid; grid-template-rows:auto minmax(0,1fr); background:#eef1f5; }}
+    header {{ min-height:64px; padding:11px 18px; display:flex; align-items:center; justify-content:space-between;
+      gap:18px; background:var(--panel); border-bottom:1px solid var(--line); z-index:1000; }}
+    h1 {{ margin:0; font-size:17px; line-height:1.35; letter-spacing:0; }}
+    .meta {{ margin-top:4px; color:var(--muted); font-size:12px; }}
+    .opacity {{ display:flex; align-items:center; gap:9px; flex:0 0 auto; color:#344054; font-size:13px; }}
+    .opacity input {{ width:128px; accent-color:var(--accent); }}
+    #map {{ min-height:0; width:100%; background:#dfe5ec; }}
+    #error {{ display:none; position:absolute; inset:64px 0 0; z-index:1200; place-items:center;
+      padding:24px; background:#f7f8fa; color:#475467; text-align:center; }}
+    .leaflet-control-layers {{ border-radius:6px; box-shadow:0 2px 10px rgba(16,24,40,.18); }}
+    @media (max-width:640px) {{
+      header {{ min-height:78px; padding:9px 12px; align-items:flex-start; }}
+      h1 {{ font-size:15px; }} .meta {{ font-size:11px; }}
+      .opacity {{ flex-direction:column; align-items:flex-end; gap:2px; font-size:11px; }}
+      .opacity input {{ width:104px; }} #error {{ inset:78px 0 0; }}
+    }}
+  </style>
+</head>
+<body>
+  <header>
+    <div><h1>{html.escape(title)}</h1><div class="meta">{html.escape(meta)}</div></div>
+    <label class="opacity"><span>结果透明度 <b id="opacityValue">70%</b></span>
+      <input id="opacity" type="range" min="0" max="100" value="70" aria-label="结果透明度">
+    </label>
+  </header>
+  <div id="map" aria-label="遥感分析结果地图"></div>
+  <div id="error">地图组件加载失败，请检查网络后刷新页面。</div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const layers = {payload};
+    const GCJ_A = 6378245.0;
+    const GCJ_EE = 0.00669342162296594323;
+
+    function transformLat(x, y) {{
+      let r = -100 + 2*x + 3*y + .2*y*y + .1*x*y + .2*Math.sqrt(Math.abs(x));
+      r += (20*Math.sin(6*x*Math.PI) + 20*Math.sin(2*x*Math.PI))*2/3;
+      r += (20*Math.sin(y*Math.PI) + 40*Math.sin(y/3*Math.PI))*2/3;
+      r += (160*Math.sin(y/12*Math.PI) + 320*Math.sin(y*Math.PI/30))*2/3;
+      return r;
+    }}
+    function transformLng(x, y) {{
+      let r = 300 + x + 2*y + .1*x*x + .1*x*y + .1*Math.sqrt(Math.abs(x));
+      r += (20*Math.sin(6*x*Math.PI) + 20*Math.sin(2*x*Math.PI))*2/3;
+      r += (20*Math.sin(x*Math.PI) + 40*Math.sin(x/3*Math.PI))*2/3;
+      r += (150*Math.sin(x/12*Math.PI) + 300*Math.sin(x/30*Math.PI))*2/3;
+      return r;
+    }}
+    function wgs84ToGcj02(lng, lat) {{
+      let dLat = transformLat(lng - 105, lat - 35);
+      let dLng = transformLng(lng - 105, lat - 35);
+      const rad = lat / 180 * Math.PI;
+      const sin = Math.sin(rad);
+      const magic = 1 - GCJ_EE * sin * sin;
+      const sqrtMagic = Math.sqrt(magic);
+      dLat = dLat * 180 / ((GCJ_A * (1 - GCJ_EE)) / (magic * sqrtMagic) * Math.PI);
+      dLng = dLng * 180 / (GCJ_A / sqrtMagic * Math.cos(rad) * Math.PI);
+      return [lng + dLng, lat + dLat];
+    }}
+    function mapBounds(bounds) {{
+      const sw = wgs84ToGcj02(bounds[0], bounds[1]);
+      const ne = wgs84ToGcj02(bounds[2], bounds[3]);
+      return [[sw[1], sw[0]], [ne[1], ne[0]]];
+    }}
+
+    if (!window.L) {{
+      document.getElementById("error").style.display = "grid";
+    }} else {{
+      const map = L.map("map", {{zoomControl:true, attributionControl:false}});
+      const satellite = L.tileLayer(
+        "https://webst0{{s}}.is.autonavi.com/appmaptile?style=6&x={{x}}&y={{y}}&z={{z}}",
+        {{subdomains:["1","2","3","4"], maxZoom:19}}
+      ).addTo(map);
+      const labels = L.tileLayer(
+        "https://webst0{{s}}.is.autonavi.com/appmaptile?style=8&x={{x}}&y={{y}}&z={{z}}",
+        {{subdomains:["1","2","3","4"], maxZoom:19}}
+      ).addTo(map);
+      const overlayControl = {{"道路与地名": labels}};
+      const resultLayers = [];
+      const fit = [];
+      layers.forEach((item, index) => {{
+        const bounds = mapBounds(item.bounds_wgs84);
+        const layer = L.imageOverlay(item.url, bounds, {{opacity:.7, interactive:false}}).addTo(map);
+        const name = overlayControl[item.title] ? `${{item.title}} (${{index + 1}})` : item.title;
+        overlayControl[name] = layer;
+        resultLayers.push(layer);
+        fit.push(bounds[0], bounds[1]);
+      }});
+      L.control.layers({{"卫星影像": satellite}}, overlayControl, {{collapsed:false}}).addTo(map);
+      map.fitBounds(fit, {{padding:[18,18], maxZoom:18}});
+      const opacity = document.getElementById("opacity");
+      opacity.addEventListener("input", () => {{
+        const value = Number(opacity.value);
+        document.getElementById("opacityValue").textContent = `${{value}}%`;
+        resultLayers.forEach((layer) => layer.setOpacity(value / 100));
+      }});
+    }}
+  </script>
+</body>
+</html>
+"""
+
     def _slug(self, text: str) -> str:
         digest = re.sub(r"[^0-9a-zA-Z_-]+", "-", text).strip("-")
         suffix = hashlib.sha1(text.encode("utf-8")).hexdigest()[:10]
@@ -498,11 +674,16 @@ class ReportService:
         max_reports = self.config.max_reports
         if max_reports <= 0:
             return
-        html_files = sorted(self.report_dir.glob("*.html"), key=lambda path: path.stat().st_mtime, reverse=True)
+        html_files = sorted(
+            (path for path in self.report_dir.glob("*.html") if not path.name.endswith(".map.html")),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
         for old_html in html_files[max_reports:]:
             stem = old_html.stem
             old_md = self.report_dir / f"{stem}.md"
-            for path in (old_html, old_md):
+            old_map = self.report_dir / f"{stem}.map.html"
+            for path in (old_html, old_md, old_map):
                 try:
                     path.unlink()
                 except FileNotFoundError:

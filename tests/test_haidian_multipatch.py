@@ -152,6 +152,92 @@ def test_report_html_has_no_embedded_map(tmp_path):
     assert "/reports/assets/p2.png" in page
 
 
+def test_report_builds_standalone_result_map(tmp_path):
+    class MuteLLM:
+        last_status = "disabled"
+
+        def complete(self, system_prompt, user_prompt):
+            return ""
+
+    analysis = AnalysisResult(
+        task="水体提取",
+        region="北京市海淀区",
+        time_range="2026-02",
+        headline="海淀区水体提取",
+        summary="海淀水体分析结果。",
+        metrics=[],
+        findings=[],
+        recommendations=[],
+        charts=[
+            ChartAsset("卫星影像", "image", "/reports/assets/base.png", "底图"),
+            ChartAsset(
+                "水体提取结果",
+                "image",
+                "/reports/assets/water.png",
+                "水体结果",
+                [116.20, 39.90, 116.22, 39.92],
+                True,
+                "patch_000106,patch_000107",
+            ),
+        ],
+    )
+    request = ReportRequest(
+        task="水体提取",
+        region="北京市海淀区",
+        prompt="海淀区2026年2月水体提取",
+        time_range="2026-02",
+    )
+    service = ReportService(
+        config=ReportConfig(report_dir=tmp_path, asset_dir=tmp_path, reuse_existing=False),
+        llm=MuteLLM(),
+    )
+
+    report = service.build(request, analysis)
+
+    assert report.map_html_url.startswith("/reports/")
+    assert report.map_html_url.endswith(".map.html")
+    map_page = (tmp_path / report.map_html_url.removeprefix("/reports/")).read_text(encoding="utf-8")
+    assert "agent-result-map-v1" in map_page
+    assert "/reports/assets/water.png" in map_page
+    assert "/reports/assets/base.png" not in map_page
+    assert "patch_000107" in map_page
+    assert "wgs84ToGcj02" in map_page
+
+
+def test_non_haidian_report_has_no_standalone_map(tmp_path):
+    analysis = AnalysisResult(
+        task="水体提取",
+        region="雅江区域",
+        time_range="2026-02",
+        headline="雅江水体提取",
+        summary="summary",
+        metrics=[],
+        findings=[],
+        recommendations=[],
+        charts=[
+            ChartAsset(
+                "水体提取结果",
+                "image",
+                "/reports/assets/water.png",
+                "水体结果",
+                [101.0, 29.0, 101.1, 29.1],
+                True,
+                "patch_1",
+            )
+        ],
+    )
+    service = ReportService(config=ReportConfig(report_dir=tmp_path, asset_dir=tmp_path))
+
+    map_url = service._write_map_page(
+        ReportRequest(task="水体提取", region="雅江区域", prompt="水体提取"),
+        analysis,
+        tmp_path / "yajiang.map.html",
+    )
+
+    assert map_url == ""
+    assert not (tmp_path / "yajiang.map.html").exists()
+
+
 def test_overlay_metadata_survives_for_the_map_panel(tmp_path, monkeypatch):
     """The frontend map panel is driven by charts[].overlay + bounds_wgs84, so
     those fields must keep flowing out of the analysis service unchanged."""

@@ -87,11 +87,39 @@ try:
         model_config = ConfigDict(json_schema_extra={"examples": [{"session_id": "frontend-session-001"}]})
         session_id: str = Field("default", description="要清空的会话 ID")
 
+    class ReportArtifactResponseModel(BaseModel):
+        """Report URLs returned when status=ok."""
+        model_config = ConfigDict(extra="allow")
+
+        title: str
+        html_url: str = Field(description="完整 HTML 报告的相对地址")
+        markdown_url: str = Field(description="Markdown 报告的相对地址")
+        map_html_url: str = Field(
+            "",
+            description="海淀交互式结果地图的相对地址；没有可上图结果时为空字符串",
+        )
+
+    class ReportResponseModel(BaseModel):
+        """Response of POST /api/report; additional analysis fields remain open."""
+        model_config = ConfigDict(extra="allow")
+
+        status: str
+        message: str = ""
+        session_id: str = "default"
+        report: ReportArtifactResponseModel | None = None
+        analysis: dict | None = None
+        request: dict = Field(default_factory=dict)
+        intent: dict | None = None
+        memory: dict = Field(default_factory=dict)
+        action: dict = Field(default_factory=dict)
+        debug: dict = Field(default_factory=dict)
+
 except ImportError:
     BaseModel = None
     ReportRequestModel = None
     PatchSearchModel = None
     SessionResetModel = None
+    ReportResponseModel = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -383,6 +411,7 @@ def create_app(agent: ReportAgent | None = None):
 
     @app.post(
         "/api/report",
+        response_model=ReportResponseModel,
         summary="主接口：对话 / 补槽 / 生成报告",
         description=(
             "自然语言驱动的统一入口。返回体的 `status` 决定前端行为：`ok`(报告已生成)、"

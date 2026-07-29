@@ -909,6 +909,7 @@ class ReportAgent:
                 title=report.title,
                 html_url=report.html_url,
                 markdown_url=report.markdown_url,
+                map_html_url=report.map_html_url,
                 request=to_dict(request),
             )
             self.memory_service.set_report_context(

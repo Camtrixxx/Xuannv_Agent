@@ -158,6 +158,9 @@ class ReportArtifact:
     charts: list[ChartAsset]
     html_url: str
     markdown_url: str
+    # Standalone interactive result map. Empty when the analysis has no
+    # georeferenced overlay (or the region is outside the current Haidian scope).
+    map_html_url: str = ""
     llm_provider: str = "template"
     reused: bool = False
     generated_at: str = ""
