@@ -233,6 +233,7 @@ Agent 只有在用户**明确请求生成报告**时才会生成报告；提问�
     "title": "雅江区域2025-09地物分类遥感分析报告",
     "html_url": "/reports/2025-09-aef_inference-xxxx.html",
     "markdown_url": "/reports/2025-09-aef_inference-xxxx.md",
+    "map_html_url": "",
     "llm_provider": "deepseek",
     "reused": false
   },
@@ -273,6 +274,20 @@ Agent 只有在用户**明确请求生成报告**时才会生成报告；提问�
   }
 }
 ```
+
+海淀报告存在可地理配准的结果图层时，`report.map_html_url` 会返回一个独立交互地图页面：
+
+```json
+"report": {
+  "html_url": "/reports/haidian-water-xxxx.html",
+  "markdown_url": "/reports/haidian-water-xxxx.md",
+  "map_html_url": "/reports/haidian-water-xxxx.map.html"
+}
+```
+
+前端可像报告页一样直接打开或放入 iframe。该页面已经包含高德卫星底图、WGS84→GCJ-02
+坐标转换、结果图层开关、透明度控制和结果范围自动定位。URL 是相对路径，需拼接
+`AGENT_BASE_URL`。若本次没有可上图结果，`map_html_url` 为空字符串。
 
 说明：
 
@@ -634,8 +649,9 @@ absolute_image_url = AGENT_BASE_URL + response.analysis.charts[0].url
 3. 把 `message` 渲染为助手回复。
 4. 当 `status=ok && report` 时，渲染报告卡片。
 5. 点击报告卡片时，在右侧面板加载 `AGENT_BASE_URL + report.html_url`。
-6. Markdown 按钮加载 `AGENT_BASE_URL + report.markdown_url`。
-7. 左侧历史会话调用 `GET /api/sessions` 和 `GET /api/session/{session_id}`。
+6. “查看地图”加载 `AGENT_BASE_URL + report.map_html_url`；字段为空时隐藏入口。
+7. Markdown 按钮加载 `AGENT_BASE_URL + report.markdown_url`。
+8. 左侧历史会话调用 `GET /api/sessions` 和 `GET /api/session/{session_id}`；历史报告同样返回 `map_html_url`。
 
 ## Curl 示例
 

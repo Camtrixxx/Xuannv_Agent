@@ -172,6 +172,7 @@ Content-Type: application/json
     "abstract": "...",
     "html_url": "/reports/xxx.html",
     "markdown_url": "/reports/xxx.md",
+    "map_html_url": "/reports/xxx.map.html",
     "metrics": [],
     "charts": []
   },
@@ -194,12 +195,16 @@ URL 都是相对路径。前端拼成绝对地址：
 const BASE = "http://112.111.7.74:1112";
 const htmlUrl = BASE + payload.report.html_url;
 const mdUrl = BASE + payload.report.markdown_url;
+const mapHtmlUrl = payload.report.map_html_url
+  ? BASE + payload.report.map_html_url
+  : "";
 const imageUrl = BASE + payload.analysis.charts[0].url;
 ```
 
 报告预览推荐：
 
 - HTML 报告：右侧 iframe 加载 `htmlUrl`。
+- 独立地图：海淀报告可直接用 iframe 加载 `mapHtmlUrl`；为空时隐藏地图入口。
 - Markdown：可以 fetch `mdUrl` 后渲染预览，也可以提供“原文”切换。
 - 图片：直接使用 `chart.url` 拼接绝对路径展示。
 
@@ -278,12 +283,18 @@ if (payload.status === "needs_annotation") {
 }
 ```
 
-## 地图图层与叠加显示（重点）
+## 地图页面与图层叠加（重点）
 
-> **变更（v9 报告模板）**：叠图从报告里搬到了**前端的地图面板**。
-> 报告 HTML 不再内嵌 Leaflet 地图，只保留文字、指标、结果图（静态图片）和数据表；
-> 结果上图由前端自己的地图面板负责。推荐的接法见下面「右侧双视图：报告 ⇄ 地图」。
-> **接口字段没有变化**，`overlay / bounds_wgs84 / patch_id` 照旧，下表不变。
+海淀报告成功时优先使用 `report.map_html_url`：这是后端生成的完整交互地图页面，前端只需
+拼接 `BASE` 后放进 iframe 或新标签页，无需自行处理底图、坐标转换和 image overlay。
+历史会话的 `memory.reports[]` 也保存该字段。
+
+如果正式前端需要把分析结果集成进自己的地图组件，再使用下述
+`analysis.charts[].overlay + bounds_wgs84` 图层协议。两种接法同时保留。
+
+> 报告正文 HTML 不内嵌地图，只保留文字、指标、结果图和数据表。独立地图使用
+> `report.map_html_url`；需要集成进前端自有地图时，`overlay / bounds_wgs84 / patch_id`
+> 图层协议照旧。推荐接法见下面「右侧双视图：报告 ⇄ 地图」。
 
 `analysis.charts[]` 里每张图是一个 `ChartAsset`。除 `title / kind / url / caption` 外，三个字段决定它在地图上如何显示：
 
