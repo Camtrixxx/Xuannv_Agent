@@ -46,7 +46,7 @@ class _ScriptedLLM(LLMProvider):
 class _FakeCapability:
     annotation_ui_base = "http://ui.test"
 
-    def resolve(self, region, target_object):
+    def resolve(self, region, target_object, *, model_type="single_time_detection", refresh=False):
         from agent.taxonomy import resolve_region_id
         return Capability(kind=NATIVE, target_object=target_object,
                           region_id=resolve_region_id(region))

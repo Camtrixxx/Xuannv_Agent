@@ -27,6 +27,7 @@ from agent.services.region_availability import (
 from agent.services.regional_analysis_service import RegionalAnalysisService
 from agent.services.region_checkup_service import RegionCheckupService
 from agent.services.change_monitor_service import ChangeMonitorService
+from agent.services.custom_model_analysis_service import CustomModelAnalysisService
 from agent.services.pressure_score_service import PressureScoreService
 from agent.services.capability_service import CapabilityService, NEEDS_ANNOTATION as CAP_NEEDS_ANNOTATION, CUSTOM_READY, CUSTOM_TRAINING, CUSTOM_FAILED
 from agent.services.report_service import ReportService
@@ -69,6 +70,7 @@ class ReportAgent:
         change_service: ChangeMonitorService | None = None,
         score_service: PressureScoreService | None = None,
         capability_service: CapabilityService | None = None,
+        custom_model_service: CustomModelAnalysisService | None = None,
     ) -> None:
         self.intent_service = intent_service or IntentService()
         self.memory_service = memory_service or MemoryService()
@@ -79,6 +81,7 @@ class ReportAgent:
         self.change_service = change_service or ChangeMonitorService()
         self.score_service = score_service or PressureScoreService()
         self.capability_service = capability_service or CapabilityService()
+        self.custom_model_service = custom_model_service or CustomModelAnalysisService()
         self.graph = self._build_graph() if StateGraph is not None else None
 
     def run(self, request: ReportRequest) -> AgentResponse:
@@ -159,6 +162,8 @@ class ReportAgent:
     def _parse_intent(self, state: ReportAgentState) -> ReportAgentState:
         request = state["request"]
         intent = self.intent_service.parse(request)
+        if request.target_object:
+            intent.target_object = request.target_object
         state["intent"] = intent
         state["status"] = AgentStatus.PARSED
         state["message"] = "已完成意图分类。"
@@ -231,7 +236,7 @@ class ReportAgent:
             return self._merge_month_aoi(state, intent, memory, previous, kind="score")
 
         # Did the user name a task or month *this turn* (vs. it only being inherited)?
-        specified_now = bool(intent.task) or bool(intent.time_range)
+        specified_now = bool(intent.task) or bool(intent.time_range) or bool(intent.target_object)
 
         # Follow-ups (slot fills, confirmations, "换个任务", or any turn with prior
         # context) inherit the earlier report slots so the user only supplies what's
@@ -249,7 +254,7 @@ class ReportAgent:
                 intent.time_range = previous.get("time_range")
 
         missing = []
-        if not intent.task:
+        if not intent.task and not intent.custom_model_id:
             missing.append("task")
         if not intent.time_range:
             missing.append("time_range")
@@ -477,7 +482,22 @@ class ReportAgent:
         ``non_native_object`` already strips region names, so a place like 雅江
         can't collide with the "江"→河流 substring alias.
         """
-        return non_native_object(intent.user_prompt or "")
+        explicit = str(getattr(intent, "target_object", "") or "").strip()
+        if explicit:
+            return explicit
+        known = non_native_object(intent.user_prompt or "")
+        if known:
+            return known
+        return ""
+
+    def _detect_target_object_dynamic(self, intent) -> str:
+        known = self._detect_target_object(intent)
+        if known:
+            return known
+        detector = getattr(self.capability_service, "detect_custom_object", None)
+        if callable(detector):
+            return str(detector(intent.region, intent.user_prompt or "") or "")
+        return ""
 
     def _gate_capability(self, state, intent, memory, previous):
         """Return a state if a non-native object blocks analysis, else None.
@@ -485,11 +505,12 @@ class ReportAgent:
         Only genuinely non-native objects (湿地/机场/…) are gated; native tasks
         return None and flow through the ordinary path untouched.
         """
-        obj = self._detect_target_object(intent)
+        obj = self._detect_target_object_dynamic(intent)
         if not obj:
             return None
         intent.target_object = obj
-        cap = self.capability_service.resolve(intent.region, obj)
+        model_type = self._custom_model_type(intent.scenario)
+        cap = self.capability_service.resolve(intent.region, obj, model_type=model_type)
         state.setdefault("debug", {})["capability"] = {
             "kind": cap.kind, "object": obj, "class": cap.class_name, "model_id": cap.model_id,
         }
@@ -497,6 +518,7 @@ class ReportAgent:
             # A trained model exists — remember it so run_analysis uses it, and
             # let the ordinary scenario/slot logic continue (fall through).
             intent.custom_model_id = cap.model_id
+            intent.task = intent.task or f"{cap.class_name}识别"
             return None
         if cap.kind == CUSTOM_TRAINING:
             state["status"] = AgentStatus.NEEDS_INPUT
@@ -519,7 +541,8 @@ class ReportAgent:
         and frame it as a retry, rather than the first-time "not built-in" copy.
         """
         month = intent.time_range or (state["request"].time_range or "")
-        action = self.capability_service.annotation_action(cap, month=month)
+        model_type = self._custom_model_type(intent.scenario)
+        action = self.capability_service.annotation_action(cap, model_type=model_type, month=month)
         state["status"] = AgentStatus.NEEDS_ANNOTATION
         state["action"] = action
         if failed:
@@ -548,6 +571,7 @@ class ReportAgent:
             "scenario": intent.scenario or ((state.get("memory") or {}).get("current_intent") or {}).get("scenario", ""),
             "model_id": model_id,
             "model_status": model_status,
+            "model_type": (action or {}).get("model_type") or self._custom_model_type(intent.scenario),
             "action": action or {},
             # Original request params so the resumed turn reruns the same task.
             "request": {
@@ -577,7 +601,7 @@ class ReportAgent:
         #     no longer mentions the pending object. Otherwise "是道路提取" stays
         #     wrongly stuck re-offering "湿地".
         prompt = intent.user_prompt or ""
-        new_obj = self._detect_target_object(intent)
+        new_obj = self._detect_target_object_dynamic(intent)
         pending_obj = non_native_object(class_name)
         if new_obj and pending_obj and new_obj != pending_obj:
             self.memory_service.clear_pending_custom_model(state["request"].session_id)
@@ -588,7 +612,13 @@ class ReportAgent:
             self.memory_service.clear_pending_custom_model(state["request"].session_id)
             return None
 
-        cap = self.capability_service.resolve(region, class_name)
+        model_type = str(pending.get("model_type") or self._custom_model_type(pending.get("scenario") or ""))
+        cap = self.capability_service.resolve(
+            region,
+            class_name,
+            model_type=model_type,
+            refresh=True,
+        )
         if cap.kind == CUSTOM_READY:
             self.memory_service.clear_pending_custom_model(state["request"].session_id)
             return self._apply_resumed_pending(state, intent, pending, cap)
@@ -614,6 +644,7 @@ class ReportAgent:
         intent.scenario = intent.scenario or pending.get("scenario") or ""
         intent.target_object = pending.get("target_object") or cap.target_object
         intent.custom_model_id = cap.model_id
+        intent.task = intent.task or saved.get("task") or f"{cap.class_name}识别"
         if not intent.time_range:
             intent.time_range = saved.get("time_range") or ""
         if not getattr(request, "before_time_range", ""):
@@ -648,6 +679,13 @@ class ReportAgent:
         state["status"] = AgentStatus.OK
         state["message"] = f"『{cap.class_name}』模型已就绪，正在生成分析。"
         return state
+
+    @staticmethod
+    def _custom_model_type(scenario: str) -> str:
+        # The current change workflow runs one single-date custom model at two
+        # months and computes gained/lost pixels inside the Agent. Selecting a
+        # change_detection checkpoint here would not match that inference path.
+        return "single_time_detection"
 
     def _route_after_merge(self, state: ReportAgentState) -> str:
         if state.get("status") == AgentStatus.CHAT:
@@ -842,6 +880,32 @@ class ReportAgent:
             if ctx.get("region") == intent.region and ctx.get("used_patch_ids"):
                 selected_patch_ids = list(ctx["used_patch_ids"])
                 inherited_patch = True
+
+        if intent.custom_model_id:
+            custom_request = ReportRequest(
+                task=intent.task or f"{intent.target_object}识别",
+                region=intent.region,
+                prompt=intent.user_prompt,
+                time_range=intent.time_range,
+                session_id=request.session_id,
+                selected_patch_ids=selected_patch_ids,
+                aoi=aoi,
+                custom_model_id=intent.custom_model_id,
+                target_object=intent.target_object,
+            )
+            state["request"] = custom_request
+            try:
+                state["analysis"] = self.custom_model_service.analyze(custom_request)
+                return state
+            except Exception as exc:
+                state["analysis"] = None
+                state["status"] = AgentStatus.NEEDS_INPUT
+                state["message"] = (
+                    "自定义模型已经找到，但这次推理没有完成。请确认所选 Patch 支持该月份，"
+                    "或重新框选区域后再试。"
+                )
+                state.setdefault("debug", {})["analysis_error"] = str(exc)
+                return state
 
         def _request(sel: list[str]) -> ReportRequest:
             return ReportRequest(

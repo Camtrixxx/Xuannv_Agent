@@ -69,7 +69,14 @@ class CapabilityService:
             or os.getenv("AGENT_ANNOTATION_UI_BASE", "http://60.31.21.42:22065")
         ).rstrip("/")
 
-    def resolve(self, region: str, target_object: str) -> Capability:
+    def resolve(
+        self,
+        region: str,
+        target_object: str,
+        *,
+        model_type: str = "single_time_detection",
+        refresh: bool = False,
+    ) -> Capability:
         """Classify a target object into one of the four capability kinds.
 
         Native objects short-circuit without touching the network. Only
@@ -91,7 +98,12 @@ class CapabilityService:
             # No object identified at all → treat as native (ordinary flow).
             return Capability(kind=NATIVE, target_object="", region_id=region_id)
 
-        matches = self.registry.find_custom_models(region_id, class_name)
+        matches = self.registry.find_custom_models(
+            region_id,
+            class_name,
+            model_type=model_type,
+            use_cache=not refresh,
+        )
         ready = next((m for m in matches if m.is_ready), None)
         if ready is not None:
             return Capability(
@@ -116,6 +128,24 @@ class CapabilityService:
             kind=NEEDS_ANNOTATION, target_object=obj, class_name=class_name,
             region_id=region_id,
         )
+
+    def detect_custom_object(self, region: str, text: str) -> str:
+        """Find a trained custom class named in free text.
+
+        This keeps newly created classes usable without adding every class name
+        to the Agent taxonomy. Native objects still win and fixed aliases are
+        handled before this method is called by the graph.
+        """
+        phrase = str(text or "")
+        if not phrase or native_object(phrase):
+            return ""
+        names = {
+            name.strip()
+            for model in self.registry.custom_models(resolve_region_id(region))
+            for name in model.class_names
+            if name.strip()
+        }
+        return next((name for name in sorted(names, key=len, reverse=True) if name in phrase), "")
 
     def annotation_action(
         self, cap: Capability, *, model_type: str = "single_time_detection", month: str = ""

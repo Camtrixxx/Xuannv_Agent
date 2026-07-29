@@ -44,6 +44,8 @@ class ModelInfo:
     accuracy: float | None = None
     metric_name: str = ""
     n_samples: int | None = None
+    created_at: str = ""
+    completed_at: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -84,6 +86,8 @@ class ModelInfo:
             accuracy=payload.get("accuracy") if isinstance(payload.get("accuracy"), (int, float)) else None,
             metric_name=str(payload.get("metric_name") or ""),
             n_samples=payload.get("n_samples") if isinstance(payload.get("n_samples"), int) else None,
+            created_at=str(payload.get("created_at") or ""),
+            completed_at=str(payload.get("completed_at") or ""),
             raw=payload,
         )
 
@@ -150,10 +154,17 @@ class ModelRegistryService:
         self._cap_cache[key] = (self._now(), caps)
         return caps
 
-    def custom_models(self, region_id: str) -> list[ModelInfo]:
-        return [m for m in self.list_models(region_id) if m.source == "custom"]
+    def custom_models(self, region_id: str, *, use_cache: bool = True) -> list[ModelInfo]:
+        return [m for m in self.list_models(region_id, use_cache=use_cache) if m.source == "custom"]
 
-    def find_custom_models(self, region_id: str, class_name: str) -> list[ModelInfo]:
+    def find_custom_models(
+        self,
+        region_id: str,
+        class_name: str,
+        *,
+        model_type: str = "",
+        use_cache: bool = True,
+    ) -> list[ModelInfo]:
         """Custom models whose class list matches ``class_name`` (alias/contains).
 
         Ready models sort first so a caller can pick ``[0]`` for the usable one.
@@ -162,10 +173,13 @@ class ModelRegistryService:
         if not target:
             return []
         out: list[ModelInfo] = []
-        for m in self.custom_models(region_id):
+        for m in self.custom_models(region_id, use_cache=use_cache):
+            if model_type and m.type != model_type:
+                continue
             names = m.class_names
             if any(target == n or target in n or n in target for n in names if n):
                 out.append(m)
+        out.sort(key=lambda m: m.created_at, reverse=True)
         out.sort(key=lambda m: (not m.is_ready, not m.is_training))
         return out
 

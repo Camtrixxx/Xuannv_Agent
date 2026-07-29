@@ -266,9 +266,9 @@ const imageUrl = BASE + payload.analysis.charts[0].url;
 
 ### 恢复流程
 
-用户完成标注/训练后回到**同一会话**说「标注好了 / 训练完了 / 好了」，再次调 `/api/report`（带同一 `session_id`）即可。Agent 会**重新核验该模型的真实状态**，不轻信口头说法：
+用户完成标注/训练后回到**同一会话**说「标注好了 / 训练完了 / 好了」，再次调 `/api/report`（带同一 `session_id`）即可。Agent 会**绕过缓存重新核验该模型的真实状态**，不轻信口头说法，也不要求前端提供 `model_id`：
 
-- 模型已就绪 → 恢复原任务（沿用之前的月份/AOI）继续分析，返回 `status=ok` + 报告。
+- 模型已就绪 → 按区域、类别和模型类型找到最新可用模型，恢复原任务（沿用之前的月份/AOI/Patch），批量推理并返回 `status=ok` + 报告；海淀结果同时带 `report.map_html_url`。
 - 仍在训练 → 返回 `status=needs_input`，提示稍候。
 - 训练失败 → 返回 `status=needs_annotation`，如实说明并再次给出 `action`（可重试标注）。
 

@@ -130,7 +130,13 @@ Frontend
 | `model_type` | `single_time_detection`（单期）或 `change_detection`（换检）|
 | `params` | 组成 `url` 的原始参数，前端也可用它自行拼链 |
 
-**恢复流程**：用户标注并训练后回到对话说“标注好了 / 训练完了 / 好了”，Agent 会**重新查询该模型的真实状态**（不轻信用户口头说法）：已就绪则恢复原任务（沿用之前的月份/AOI）继续分析；仍在训练则提示稍候；若训练失败则如实说明并再次给出标注入口（`action` 复现）。调试阶段前端可用 mock 页面承接该 `url`。
+**恢复流程**：用户标注并训练后回到同一会话说“标注好了 / 训练完了 / 好了”，Agent 会**立即绕过模型列表缓存，重新查询真实状态**（不轻信用户口头说法），并按 `region_id + class_name + model_type` 匹配最新可用模型：
+
+- 已就绪：恢复原任务以及此前的月份/AOI/Patch；单期任务调用 `/models/{model_id}/infer_batch`（最多 100 个 Patch），将目标类别生成透明地图图层，再照常返回报告 `html_url` 与地图 `map_html_url`。
+- 仍在训练：返回 `needs_input` 提示稍候，pending 任务继续保留。
+- 训练失败：返回 `needs_annotation`，如实说明并再次给出标注入口。
+
+前端不需要查询模型列表、保存 `model_id` 或调用推理接口，只需保持 `session_id` 不变并把用户的“训练完成”作为普通消息再次提交到 `/api/report`。当前自定义变化监测仍复用单期模型分别推理两个月份，由 Agent 计算新增/减少，因此交接的模型类型为 `single_time_detection`。
 
 ### 对话与报告的边界（重要）
 
@@ -186,6 +192,8 @@ Agent 只有在用户**明确请求生成报告**时才会生成报告；提问�
 | `selected_patch_ids` | 海淀二选一 | 地图选择得到的 patch ID 列表，例如 `["patch_000020", "patch_000021"]`；与 `aoi` 至少提供一个 |
 | `aoi` | 海淀二选一 | 地图框选范围，推荐 `{ "type": "bbox", "coordinates": [minLng, minLat, maxLng, maxLat] }`；与 `selected_patch_ids` 至少提供一个 |
 | `before_time_range` / `after_time_range` | 否 | 仅建设扰动监测（场景 B）用的两期月份 `YYYY-MM`。前端也可让用户在 `prompt` 里写"2025-12 到 2026-05"由后端抽取 |
+
+`custom_model_id` 是 Agent 内部恢复后写入的字段，前端不要传。`target_object` 通常也由 Agent 从话术或在线模型注册表识别；如果前端标注页支持完全自由的新类别，可在回到对话时显式传类别名作为兜底。模型匹配、批量推理、目标类别提取和报告/地图生成均由 Agent 完成。
 
 海淀普通报告没有 `selected_patch_ids` 且没有有效 `aoi` 时返回 `needs_input`，提示用户先在地图上框选区域；
 后端不会再从海淀全区自动抽取 Patch。已有海淀报告后的换任务或换月份会优先复用上一次成功选区。

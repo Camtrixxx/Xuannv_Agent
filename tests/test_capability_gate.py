@@ -23,7 +23,7 @@ class FakeCapability:
         self._by_object = by_object  # obj/class -> Capability
         self.annotation_ui_base = "http://ui.test"
 
-    def resolve(self, region, target_object):
+    def resolve(self, region, target_object, *, model_type="single_time_detection", refresh=False):
         from agent.taxonomy import non_native_object, resolve_region_id
         key = non_native_object(target_object) or target_object
         cap = self._by_object.get(key)
@@ -77,6 +77,7 @@ def _agent(tmp_path, by_object):
         change_service=stub,
         checkup_service=stub,
         score_service=stub,
+        custom_model_service=stub,
         report_service=_StubReport(),
     )
 
@@ -127,6 +128,48 @@ def test_resume_after_training_ready(tmp_path):
     # Pending cleared, and the change scenario resumed (months were remembered).
     assert r2.memory.get("pending_custom_model") in (None, {})
     assert r2.intent is not None and r2.intent.custom_model_id == "model_x"
+
+
+def test_ready_single_time_custom_model_runs_without_native_task(tmp_path):
+    caps = {
+        "湿地": Capability(
+            kind=CUSTOM_READY,
+            class_name="湿地",
+            model_id="model_single",
+            model_status="completed",
+        )
+    }
+    agent = _agent(tmp_path, caps)
+    result = agent.run(_req(
+        "海淀2026年3月湿地分布",
+        "single-custom",
+        selected_patch_ids=["patch_000001", "patch_000002"],
+    ))
+    assert result.status == AgentStatus.OK
+    assert result.intent.custom_model_id == "model_single"
+    assert result.intent.task == "湿地识别"
+    assert result.request.selected_patch_ids == ["patch_000001", "patch_000002"]
+
+
+def test_frontend_target_object_supports_new_unlisted_class(tmp_path):
+    caps = {
+        "光伏板": Capability(
+            kind=CUSTOM_READY,
+            class_name="光伏板",
+            model_id="model_pv",
+            model_status="completed",
+        )
+    }
+    agent = _agent(tmp_path, caps)
+    result = agent.run(_req(
+        "海淀2026年3月分析",
+        "explicit-custom",
+        target_object="光伏板",
+        selected_patch_ids=["patch_000003"],
+    ))
+    assert result.status == AgentStatus.OK
+    assert result.intent.target_object == "光伏板"
+    assert result.intent.custom_model_id == "model_pv"
 
 
 def test_resume_still_training(tmp_path):

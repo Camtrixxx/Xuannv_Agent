@@ -87,6 +87,14 @@ def test_find_custom_models_ready_sorts_first(monkeypatch):
     assert found[0].id == "model_wet1"  # completed before training
 
 
+def test_find_custom_models_filters_model_type(monkeypatch):
+    svc = _registry(monkeypatch, [CUSTOM_WETLAND, CUSTOM_AEF])
+    single = svc.find_custom_models("haidian", "湿地", model_type="single_time_detection")
+    change = svc.find_custom_models("haidian", "湿地", model_type="change_detection")
+    assert [m.id for m in single] == ["model_wet1"]
+    assert [m.id for m in change] == ["model_aef1"]
+
+
 def test_cache_hit_avoids_refetch(monkeypatch):
     svc = ModelRegistryService(cache_ttl=60.0)
     calls = {"n": 0}
@@ -107,6 +115,40 @@ def test_cache_hit_avoids_refetch(monkeypatch):
 def test_empty_class_name_returns_nothing(monkeypatch):
     svc = _registry(monkeypatch, [CUSTOM_WETLAND])
     assert svc.find_custom_models("haidian", "") == []
+
+
+def test_capability_refresh_bypasses_cached_model_list(monkeypatch):
+    from agent.services.capability_service import CapabilityService, CUSTOM_READY, NEEDS_ANNOTATION
+
+    svc = ModelRegistryService(cache_ttl=60.0)
+    responses = [[], [CUSTOM_WETLAND]]
+    calls = {"n": 0}
+
+    def fake_models(path):
+        index = min(calls["n"], len(responses) - 1)
+        calls["n"] += 1
+        return responses[index]
+
+    monkeypatch.setattr(svc.http, "get_list_optional", fake_models)
+    capability = CapabilityService(registry=svc)
+    assert capability.resolve("北京市海淀区", "湿地").kind == NEEDS_ANNOTATION
+    assert capability.resolve("北京市海淀区", "湿地").kind == NEEDS_ANNOTATION
+    assert calls["n"] == 1
+    assert capability.resolve("北京市海淀区", "湿地", refresh=True).kind == CUSTOM_READY
+    assert calls["n"] == 2
+
+
+def test_detect_custom_object_uses_live_registry_classes(monkeypatch):
+    from agent.services.capability_service import CapabilityService
+
+    photovoltaic = {
+        **CUSTOM_WETLAND,
+        "id": "model_pv",
+        "classes": [{"id": "pv", "name": "光伏板", "color": "#ffaa00"}],
+    }
+    service = CapabilityService(registry=_registry(monkeypatch, [photovoltaic]))
+    assert service.detect_custom_object("北京市海淀区", "分析2026年3月的光伏板分布") == "光伏板"
+    assert service.detect_custom_object("北京市海淀区", "分析建筑物分布") == ""
 
 
 @pytest.mark.skipif(not LIVE, reason="set AGENT_LIVE_TESTS=1 to hit the live API")
