@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 
 from PIL import Image
@@ -34,6 +35,12 @@ def _png(path: Path, foreground_columns: int) -> Path:
             pixels[x, y] = (230, 0, 0)
     image.save(path, format="PNG")
     return path
+
+
+def _png_bytes(colour: tuple[int, int, int]) -> bytes:
+    buffer = BytesIO()
+    Image.new("RGB", (4, 4), colour).save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def _service(monkeypatch, tmp_path: Path, patches: list[dict], failed: set[str] | None = None):
@@ -164,3 +171,70 @@ def test_overlay_metadata_survives_for_the_map_panel(tmp_path, monkeypatch):
     for chart in layers:
         assert len(chart.bounds_wgs84) == 4
         assert chart.url
+
+
+def test_remote_asset_refreshes_when_same_result_url_changes(tmp_path, monkeypatch):
+    service = HaidianEmbeddingAnalysisService(
+        config=EmbeddingAPIConfig(base_url="http://test"),
+        report_config=ReportConfig(asset_dir=tmp_path),
+    )
+    request = ReportRequest(
+        task="土地覆盖分类",
+        region="北京市海淀区",
+        prompt="检查专题结果更新",
+        time_range="2026-02",
+    )
+    old_content = _png_bytes((245, 220, 90))
+    new_content = _png_bytes((190, 170, 130))
+    responses = iter([old_content, new_content, new_content])
+    monkeypatch.setattr(service.http, "fetch_bytes", lambda *args, **kwargs: next(responses))
+
+    args = (
+        "/regions/haidian/patches/patch_000107/tasks/land_cover_classification/result"
+        "?format=png&version=v1&month=202602",
+        request,
+        "land_cover_classification",
+        "task_result_patch_000107",
+    )
+    old_path = service._download_remote_asset(*args)
+    new_path = service._download_remote_asset(*args)
+    repeated_new_path = service._download_remote_asset(*args)
+
+    assert old_path != new_path
+    assert new_path == repeated_new_path
+    assert old_path.read_bytes() == old_content
+    assert new_path.read_bytes() == new_content
+
+
+def test_mosaic_url_changes_when_one_patch_result_changes(tmp_path, monkeypatch):
+    service = HaidianEmbeddingAnalysisService(
+        config=EmbeddingAPIConfig(base_url="http://test"),
+        report_config=ReportConfig(asset_dir=tmp_path),
+    )
+    request = ReportRequest(
+        task="土地覆盖分类",
+        region="北京市海淀区",
+        prompt="检查拼接结果更新",
+        time_range="2026-02",
+    )
+    old_content = _png_bytes((245, 220, 90))
+    new_content = _png_bytes((190, 170, 130))
+    monkeypatch.setattr(service.http, "fetch_bytes", lambda *args, **kwargs: old_content)
+    old_tile = service._download_remote_asset("/patch-107.png", request, "land_cover_classification", "p107")
+    monkeypatch.setattr(service.http, "fetch_bytes", lambda *args, **kwargs: new_content)
+    new_tile = service._download_remote_asset("/patch-107.png", request, "land_cover_classification", "p107")
+    neighbour = _png(tmp_path / "p108.png", 1)
+    south = {"bounds": [0.0, 0.0, 1280.0, 1280.0]}
+    north = {"bounds": [0.0, 1280.0, 1280.0, 2560.0]}
+    stats = {}
+
+    old_mosaic = service._stitch_patches(
+        [(south, old_tile, stats), (north, neighbour, stats)], "land_cover_classification"
+    )
+    new_mosaic = service._stitch_patches(
+        [(south, new_tile, stats), (north, neighbour, stats)], "land_cover_classification"
+    )
+
+    assert old_mosaic is not None
+    assert new_mosaic is not None
+    assert old_mosaic != new_mosaic

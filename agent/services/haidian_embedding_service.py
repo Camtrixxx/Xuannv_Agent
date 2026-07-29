@@ -4,6 +4,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 from urllib.parse import urlencode
 
@@ -376,9 +377,40 @@ class HaidianEmbeddingAnalysisService:
 
     def _download_remote_asset(self, remote_url: str, request: ReportRequest, task_id: str, kind: str) -> Path:
         source_url = self.http._url(remote_url)
-        digest = hashlib.sha1(f"{source_url}-{request.time_range}-{task_id}-{kind}".encode("utf-8")).hexdigest()[:12]
+        # Result endpoints can be updated in place while keeping the same URL
+        # and version query parameter. Always revalidate against the upstream
+        # bytes, then keep an immutable, content-addressed local copy. This also
+        # changes the downstream mosaic URL when any one patch is regenerated.
+        content = self.http.fetch_bytes(remote_url, asset_label="海淀专题图像")
+        digest = hashlib.sha1(
+            b"\0".join(
+                [
+                    source_url.encode("utf-8"),
+                    str(request.time_range).encode("utf-8"),
+                    task_id.encode("utf-8"),
+                    kind.encode("utf-8"),
+                    content,
+                ]
+            )
+        ).hexdigest()[:12]
         out_path = self.asset_dir / f"haidian_{task_id}_{kind}_{digest}.png"
-        return self.http.download(remote_url, out_path, asset_label="海淀专题图像")
+        if not out_path.exists():
+            temp_path: Path | None = None
+            try:
+                with NamedTemporaryFile(
+                    mode="wb",
+                    dir=self.asset_dir,
+                    prefix=f".{out_path.name}.",
+                    suffix=".tmp",
+                    delete=False,
+                ) as temp_file:
+                    temp_file.write(content)
+                    temp_path = Path(temp_file.name)
+                temp_path.replace(out_path)
+            finally:
+                if temp_path is not None:
+                    temp_path.unlink(missing_ok=True)
+        return out_path
 
     def _asset_url(self, path: Path) -> str:
         return f"/reports/assets/{path.name}"
