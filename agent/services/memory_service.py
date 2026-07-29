@@ -13,7 +13,9 @@ from agent.config import MemoryConfig
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # Keep storage/API timestamps in UTC, but retain enough precision for two
+    # sessions updated within the same second to sort deterministically.
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 @dataclass
@@ -167,7 +169,7 @@ class MemoryService:
                 SELECT session_id, current_intent, summary, mode, turn_count,
                        last_user_message, last_agent_message, created_at, updated_at
                 FROM sessions
-                ORDER BY updated_at DESC
+                ORDER BY updated_at DESC, created_at DESC, rowid DESC
                 LIMIT ?
                 """,
                 (limit,),

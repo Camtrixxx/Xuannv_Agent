@@ -231,23 +231,6 @@
       font-size: 14px;
     }
 
-    .memory-strip {
-      display: flex;
-      justify-content: center;
-      gap: 8px;
-      flex-wrap: wrap;
-      margin-top: 10px;
-      color: var(--muted);
-      font-size: 12px;
-    }
-
-    .memory-strip span {
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      padding: 4px 9px;
-      background: rgba(255, 255, 255, 0.72);
-    }
-
     .messages {
       min-height: 0;
       overflow-y: auto;
@@ -1271,10 +1254,6 @@
             <div class="intro">
               <h1>一句话生成遥感分析报告</h1>
               <p>直接用自然语言说出你的需求即可；想生成报告时，也可以顺手选择任务标签和地图区域。</p>
-              <div class="memory-strip" id="memoryStrip">
-                <span>会话：新建</span>
-                <span>状态：等待输入</span>
-              </div>
             </div>
 
             <div class="messages" id="messages">
@@ -1459,6 +1438,7 @@
     let candidatePatches = [];
     let patchSearchController = null;
     let patchSearchRequestId = 0;
+    let sessionRefreshRequestId = 0;
     let selectionLayer = null;
     let patchLayers = [];
     let mapResizeObserver = null;
@@ -1504,24 +1484,55 @@
       `).join("");
     }
 
-    function formatSessionTime(value) {
+    function parseApiTime(value) {
       if (!value) {
-        return "";
+        return null;
       }
-      const normalized = value.replace("Z", "");
-      const parts = normalized.split("T");
-      if (parts.length < 2) {
-        return value;
+      const text = String(value).trim();
+      // Historical records without an explicit offset were also written in
+      // UTC, so make that assumption explicit before parsing.
+      const normalized = /(?:Z|[+-]\d{2}:\d{2})$/i.test(text) ? text : `${text}Z`;
+      const date = new Date(normalized);
+      return Number.isNaN(date.getTime()) ? null : date;
+    }
+
+    function formatSessionTime(value) {
+      const date = parseApiTime(value);
+      if (!date) {
+        return value || "";
       }
-      return `${parts[0]} ${parts[1].slice(0, 5)}`;
+      const parts = new Intl.DateTimeFormat("zh-CN", {
+        timeZone: "Asia/Shanghai",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23"
+      }).formatToParts(date);
+      const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+      return `北京时间 ${values.year}-${values.month}-${values.day} ${values.hour}:${values.minute}`;
+    }
+
+    function sessionTime(session, field) {
+      const parsed = parseApiTime(session[field]);
+      return parsed ? parsed.getTime() : 0;
+    }
+
+    function sortSessionsByLatest(sessions) {
+      return [...sessions].sort((left, right) => (
+        sessionTime(right, "updated_at") - sessionTime(left, "updated_at")
+        || sessionTime(right, "created_at") - sessionTime(left, "created_at")
+      ));
     }
 
     function renderSessionList(sessions) {
-      if (!sessions.length) {
+      const orderedSessions = sortSessionsByLatest(sessions);
+      if (!orderedSessions.length) {
         sessionList.innerHTML = '<div class="session-empty">暂无历史会话。</div>';
         return;
       }
-      sessionList.innerHTML = sessions.map((session) => `
+      sessionList.innerHTML = orderedSessions.map((session) => `
         <button class="session-item ${session.session_id === sessionId ? "active" : ""}" data-session-id="${escapeHtml(session.session_id)}" type="button">
           <strong>${escapeHtml(session.title || "新会话")}</strong>
           <span>${escapeHtml(session.summary || session.last_user_message || "等待输入")}</span>
@@ -1531,11 +1542,18 @@
     }
 
     async function refreshSessions() {
+      const requestId = ++sessionRefreshRequestId;
       try {
         const response = await fetch("/api/sessions?limit=40");
         const payload = await response.json();
+        if (requestId !== sessionRefreshRequestId) {
+          return;
+        }
         renderSessionList(payload.sessions || []);
       } catch (error) {
+        if (requestId !== sessionRefreshRequestId) {
+          return;
+        }
         sessionList.innerHTML = '<div class="session-empty">历史会话加载失败。</div>';
       }
     }
@@ -1658,12 +1676,6 @@
         setSessionId(nextSessionId);
         closePreview();
         restoreMessages(payload.memory || {});
-        updateMemoryStrip({
-          status: payload.session?.mode || "idle",
-          session_id: sessionId,
-          memory: payload.memory || {},
-          intent: payload.session?.current_intent || {}
-        });
         const intent = payload.session?.current_intent || {};
         if (intent.region && regionData[intent.region]) {
           currentRegion = intent.region;
@@ -1681,7 +1693,6 @@
       setSessionId(createSessionId());
       closePreview();
       renderInitialMessage("新会话已创建。直接说出你想分析什么就行，比如“哈尔滨新区上个月的建筑物提取”。");
-      updateMemoryStrip({status: "idle", session_id: sessionId, memory: {pending_slots: [], reports: []}});
       await refreshSessions();
       document.getElementById("prompt").focus();
     }
@@ -2392,22 +2403,6 @@
       setPreviewMode("report");
     }
 
-    function updateMemoryStrip(payload) {
-      const memory = payload.memory || {};
-      const intent = payload.intent || memory.current_intent || {};
-      const slots = memory.pending_slots || [];
-      const reports = memory.reports || [];
-      document.getElementById("memoryStrip").innerHTML = `
-        <span>会话：${escapeHtml((payload.session_id || sessionId).slice(0, 18))}</span>
-        <span>状态：${escapeHtml(payload.status || memory.mode || "idle")}</span>
-        <span>任务：${escapeHtml(intent.task || currentTask)}</span>
-        <span>地区：${escapeHtml(intent.region || currentRegion)}</span>
-        <span>时间：${escapeHtml(intent.time_range || "待补充")}</span>
-        <span>缺失：${escapeHtml(slots.length ? slots.join(", ") : "无")}</span>
-        <span>历史报告：${escapeHtml(String(reports.length || 0))}</span>
-      `;
-    }
-
     function renderAnnotation(payload) {
       const action = payload.action || {};
       const url = action.url || "";
@@ -2462,8 +2457,7 @@
           })
         });
         const payload = await response.json();
-        updateMemoryStrip(payload);
-        refreshSessions();
+        await refreshSessions();
         if (!response.ok || payload.status !== "ok") {
           if (payload.status === "needs_input") {
             messages.removeChild(messages.lastElementChild);
@@ -2487,7 +2481,6 @@
         // Live update: both right-pane views reflect the newest task result.
         updateResultMap(payload);
         updateResultReport(payload);
-        refreshSessions();
       } catch (error) {
         messages.removeChild(messages.lastElementChild);
         addMessage(`
@@ -2509,7 +2502,6 @@
         body: JSON.stringify({session_id: sessionId})
       });
       messages.innerHTML = '<div class="msg agent">会话已清空。直接说出你想分析什么就行，也可以先和我聊聊。</div>';
-      updateMemoryStrip({status: "idle", session_id: sessionId, memory: {pending_slots: []}});
       closePreview();
       refreshSessions();
     }
@@ -2642,7 +2634,6 @@
     renderTaskTags(currentTask);
     setPreviewMode("report");
     updateMapLabel();
-    updateMemoryStrip({status: "idle", session_id: sessionId, memory: {pending_slots: []}});
     refreshSessions();
   </script>
 </body>
