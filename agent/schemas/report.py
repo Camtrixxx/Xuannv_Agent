@@ -23,6 +23,7 @@ class AgentRoute:
     ASK_CLARIFICATION = "ask_clarification"
     ASK_CONFIRMATION = "ask_confirmation"
     CHAT_RESPONSE = "chat_response"
+    REVISE_REPORT = "revise_report"
     RUN_ANALYSIS = "run_analysis"
 
 
@@ -34,6 +35,9 @@ class MessageType:
     CONFIRMATION = "confirmation"
     # Asking about / discussing / drilling into an already-generated report.
     FOLLOW_UP = "follow_up"
+    # An instruction that changes the last report's presentation/content
+    # without rerunning remote sensing inference (精简/扩写/改写/润色…).
+    REPORT_EDIT = "report_edit"
 
 
 @dataclass(slots=True)

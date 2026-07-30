@@ -120,8 +120,20 @@ def test_followup_question_detected():
     assert intent.is_complete  # follow-up needs no slots
 
 
-def test_rewrite_request_detected_as_followup():
-    for prompt in ("给我一份精简版", "用通俗的话重写一下", "这部分再展开详细点", "总结一下"):
+def test_rewrite_request_detected_as_report_edit():
+    for prompt in (
+        "给我一份精简版",
+        "用通俗的话重写一下",
+        "这部分再展开详细点",
+        "把建议部分展开",
+        "在报告里补充风险分析",
+        "总结一下",
+    ):
+        assert _intent(prompt).message_type == MessageType.REPORT_EDIT, prompt
+
+
+def test_explanatory_report_question_remains_followup():
+    for prompt in ("为什么林地占比这么高", "这个结论怎么理解", "解释一下总体精度"):
         assert _intent(prompt).message_type == MessageType.FOLLOW_UP, prompt
 
 

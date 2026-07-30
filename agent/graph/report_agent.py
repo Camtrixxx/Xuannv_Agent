@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, TypedDict
 
@@ -7,7 +8,10 @@ from agent.schemas.report import (
     AgentResponse,
     AgentRoute,
     AgentStatus,
+    AnalysisResult,
+    ChartAsset,
     MessageType,
+    MetricCard,
     ReportRequest,
     infer_two_months,
     to_dict,
@@ -90,6 +94,8 @@ class ReportAgent:
             route = self._route_after_merge(state)
             if route == AgentRoute.CHAT_RESPONSE:
                 state = self._chat_response(state)
+            elif route == AgentRoute.REVISE_REPORT:
+                state = self._revise_report(state)
             elif route == AgentRoute.ASK_CLARIFICATION:
                 state = self._ask_clarification(state)
             else:
@@ -130,6 +136,7 @@ class ReportAgent:
         graph.add_node("merge_memory", self._merge_memory)
         graph.add_node("ask_clarification", self._ask_clarification)
         graph.add_node("chat_response", self._chat_response)
+        graph.add_node("revise_report", self._revise_report)
         graph.add_node("run_analysis", self._run_analysis)
         graph.add_node("generate_report", self._generate_report)
         graph.add_node("write_memory", self._write_memory)
@@ -141,12 +148,14 @@ class ReportAgent:
             self._route_after_merge,
             {
                 AgentRoute.CHAT_RESPONSE: "chat_response",
+                AgentRoute.REVISE_REPORT: "revise_report",
                 AgentRoute.ASK_CLARIFICATION: "ask_clarification",
                 AgentRoute.RUN_ANALYSIS: "run_analysis",
             },
         )
         graph.add_edge("ask_clarification", "write_memory")
         graph.add_edge("chat_response", "write_memory")
+        graph.add_edge("revise_report", "write_memory")
         graph.add_edge("run_analysis", "generate_report")
         graph.add_edge("generate_report", "write_memory")
         graph.add_edge("write_memory", END)
@@ -184,6 +193,15 @@ class ReportAgent:
             resumed = self._resume_after_training(state, intent, memory)
             if resumed is not None:
                 return resumed
+
+        if intent.message_type == MessageType.REPORT_EDIT:
+            if memory.get("report_context"):
+                state["status"] = AgentStatus.OK
+                state["message"] = "正在按你的要求生成新版报告。"
+            else:
+                state["status"] = AgentStatus.NEEDS_INPUT
+                state["message"] = "当前会话还没有可编辑的报告，请先生成一份报告。"
+            return state
 
         if intent.message_type in {MessageType.FREE_CHAT, MessageType.FOLLOW_UP}:
             state["status"] = AgentStatus.CHAT
@@ -694,6 +712,9 @@ class ReportAgent:
             # Both are terminal "ask the user" turns; the message/action is
             # already set by the gate/slot logic.
             return AgentRoute.ASK_CLARIFICATION
+        intent = state.get("intent")
+        if intent is not None and intent.message_type == MessageType.REPORT_EDIT:
+            return AgentRoute.REVISE_REPORT
         return AgentRoute.RUN_ANALYSIS
 
     def _clarify_message(self, missing: list[str], region: str = "") -> str:
@@ -778,6 +799,139 @@ class ReportAgent:
         else:
             state["message"] = self._fallback_chat_response(request.prompt)
         return state
+
+    def _revise_report(self, state: ReportAgentState) -> ReportAgentState:
+        """Generate a new report version from the last analysis, without inference."""
+        request = state["request"]
+        memory = state.get("memory") or {}
+        context = dict(memory.get("report_context") or {})
+        if not context.get("artifact"):
+            reports = memory.get("reports") or []
+            if reports:
+                latest = reports[0]
+                context["artifact"] = {
+                    "html_url": latest.get("html_url") or "",
+                    "markdown_url": latest.get("markdown_url") or "",
+                    "map_html_url": latest.get("map_html_url") or "",
+                }
+        analysis = self._analysis_from_report_context(context)
+        if analysis is None:
+            state["status"] = AgentStatus.NEEDS_INPUT
+            state["message"] = "上一份报告缺少可编辑的数据上下文，请重新生成一次原报告后再修改。"
+            return state
+        saved_request = context.get("request") if isinstance(context.get("request"), dict) else {}
+        revised_request = ReportRequest.from_dict({
+            **saved_request,
+            "prompt": request.prompt,
+            "session_id": request.session_id,
+            "region": analysis.region or saved_request.get("region") or request.region,
+            "task": analysis.task or saved_request.get("task") or request.task,
+            "time_range": analysis.time_range or saved_request.get("time_range") or request.time_range,
+        })
+        state["request"] = revised_request
+        state["analysis"] = analysis
+        try:
+            state["report"] = self.report_service.revise(
+                revised_request,
+                analysis,
+                request.prompt,
+                previous_context=context,
+            )
+        except Exception as exc:
+            state["report"] = None
+            state["analysis"] = None
+            state["status"] = AgentStatus.ERROR
+            state["message"] = "新版报告生成失败，请稍后再试或换一种修改要求。"
+            state.setdefault("debug", {})["revision_error"] = str(exc)
+            return state
+        state["status"] = AgentStatus.OK
+        state["message"] = "已按你的要求生成新版报告。"
+        state.setdefault("debug", {})["report_revision"] = True
+        return state
+
+    @staticmethod
+    def _analysis_from_report_context(context: dict[str, Any]) -> AnalysisResult | None:
+        payload = context.get("analysis")
+        if not isinstance(payload, dict) or not payload:
+            section_bodies = [
+                str(item.get("body") or "")
+                for item in (context.get("sections") or [])
+                if isinstance(item, dict) and item.get("body")
+            ]
+            title = str(context.get("title") or "遥感分析报告")
+            return AnalysisResult(
+                task=str(context.get("task") or "遥感分析"),
+                region=str(context.get("region") or ""),
+                time_range=str(context.get("time_range") or ""),
+                headline=title.removesuffix("报告"),
+                summary=str(context.get("summary") or ""),
+                metrics=[
+                    MetricCard(str(item.get("label") or ""), str(item.get("value") or ""))
+                    for item in (context.get("metrics") or [])
+                    if isinstance(item, dict)
+                ],
+                findings=section_bodies,
+                recommendations=[],
+                narrative_blocks=list(context.get("sections") or []),
+                data_source=str(context.get("data_source") or "prototype"),
+                aef_payload={
+                    "used_patch_ids": list(context.get("used_patch_ids") or []),
+                    "fingerprint": f"legacy-{hashlib.sha1(title.encode('utf-8')).hexdigest()[:12]}",
+                },
+                data_table=list(context.get("distribution") or []),
+            )
+
+        def metrics(values) -> list[MetricCard]:
+            return [
+                MetricCard(
+                    label=str(item.get("label") or ""),
+                    value=str(item.get("value") or ""),
+                    description=str(item.get("description") or ""),
+                )
+                for item in (values or [])
+                if isinstance(item, dict)
+            ]
+
+        def charts(values) -> list[ChartAsset]:
+            return [
+                ChartAsset(
+                    title=str(item.get("title") or ""),
+                    kind=str(item.get("kind") or "image"),
+                    url=str(item.get("url") or ""),
+                    caption=str(item.get("caption") or ""),
+                    bounds_wgs84=list(item.get("bounds_wgs84") or []),
+                    overlay=bool(item.get("overlay")),
+                    patch_id=str(item.get("patch_id") or ""),
+                )
+                for item in (values or [])
+                if isinstance(item, dict)
+            ]
+
+        try:
+            return AnalysisResult(
+                task=str(payload.get("task") or ""),
+                region=str(payload.get("region") or ""),
+                time_range=str(payload.get("time_range") or ""),
+                headline=str(payload.get("headline") or context.get("title") or "遥感分析"),
+                summary=str(payload.get("summary") or context.get("summary") or ""),
+                metrics=metrics(payload.get("metrics")),
+                findings=list(payload.get("findings") or []),
+                recommendations=list(payload.get("recommendations") or []),
+                narrative_blocks=list(payload.get("narrative_blocks") or []),
+                risks=list(payload.get("risks") or []),
+                method_notes=list(payload.get("method_notes") or []),
+                limitations=list(payload.get("limitations") or []),
+                confidence_notes=list(payload.get("confidence_notes") or []),
+                data_source=str(payload.get("data_source") or "prototype"),
+                generated_at=str(payload.get("generated_at") or ""),
+                aef_payload=dict(payload.get("aef_payload") or {}),
+                charts=charts(payload.get("charts")),
+                data_table=list(payload.get("data_table") or []),
+                data_table_title=str(payload.get("data_table_title") or ""),
+                patch_results=list(payload.get("patch_results") or []),
+            )
+        except (TypeError, ValueError):
+            return None
 
     def _fallback_chat_response(self, prompt: str) -> str:
         text = prompt.strip()
@@ -974,7 +1128,9 @@ class ReportAgent:
                 "after_time_range": getattr(request, "after_time_range", ""),
             }
             pending_slots = intent.missing_fields or intent.confirmation_fields
-        if state.get("status") == AgentStatus.CHAT:
+        if state.get("status") == AgentStatus.CHAT or (
+            intent is not None and intent.message_type == MessageType.REPORT_EDIT
+        ):
             previous = self.memory_service.snapshot(request.session_id)
             current_intent = previous.get("current_intent") or current_intent
             pending_slots = previous.get("pending_slots") or pending_slots
@@ -1015,6 +1171,13 @@ class ReportAgent:
             "metrics": [{"label": m.label, "value": m.value} for m in (report.metrics or [])],
             "distribution": getattr(analysis, "data_table", []) or [],
             "sections": report.sections or [],
+            "request": to_dict(request),
+            "analysis": to_dict(analysis) if analysis is not None else {},
+            "artifact": {
+                "html_url": report.html_url,
+                "markdown_url": report.markdown_url,
+                "map_html_url": report.map_html_url,
+            },
             # Patch(es) actually used, so a task/month change reuses the same location.
             "used_patch_ids": self._used_patch_ids(analysis),
         }

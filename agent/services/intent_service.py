@@ -60,7 +60,7 @@ class IntentService:
         # Scenarios are report-producing intents; skip pure chat/follow-up turns.
         # (Questions stay follow-up by the codebase's "questions never trigger a
         # report" rule — the user must ask explicitly.)
-        if intent.message_type in {MessageType.FREE_CHAT, MessageType.FOLLOW_UP}:
+        if intent.message_type in {MessageType.FREE_CHAT, MessageType.FOLLOW_UP, MessageType.REPORT_EDIT}:
             return ""
         text = request.prompt or ""
         # Change monitoring wins over checkup when a two-date intent is expressed,
@@ -119,10 +119,10 @@ class IntentService:
                 "支持地区": SUPPORTED_REGIONS,
                 "当前日期": (self.today or date.today()).isoformat(),
                 "要求": {
-                    "message_type": "report_request / slot_fill / free_chat / change_context / confirmation / follow_up 之一；"
+                    "message_type": "report_request / slot_fill / free_chat / change_context / confirmation / follow_up / report_edit 之一；"
                     "日常闲聊、问候、常识/时间/天气等无关问题一律 free_chat；"
-                    "对上一次已生成报告结果的追问、解释、深入讨论，或要求换种说法/精简/展开/重写/总结"
-                    "（未指定新的任务或月份）用 follow_up",
+                    "对上一次报告的追问、解释、深入讨论用 follow_up；要求精简、扩写、改写、润色、"
+                    "调整结构或生成其他版本（且未指定新任务/地区/月）用 report_edit",
                     "task": "只有用户文本明确提到或前端已选择时才填写，且必须是支持任务之一；否则返回空字符串，绝不猜测",
                     "region": "必须是支持地区之一，优先使用前端选择，除非用户文本明确改写",
                     "time_range": "YYYY-MM 格式；如果用户没有明确月份，返回空字符串",
@@ -263,20 +263,34 @@ class IntentService:
         time_range = request.time_range or infer_time_range(prompt, today=self.today)
         if time_range and message_type == MessageType.REPORT_REQUEST and len(prompt) <= 12:
             message_type = MessageType.SLOT_FILL
-        # A question that asks to explain/expand on existing results (and does not
-        # name a new task or month) is a follow-up discussion, not a new report.
+        # Report-edit commands produce a new report artifact without rerunning
+        # inference. Explanatory questions remain ordinary grounded dialogue.
+        report_edit_cues = [
+            "重写", "改写", "重新写", "再写", "润色", "精简", "精简版", "简版",
+            "简洁", "简短", "缩短", "浓缩", "通俗", "白话", "口语", "换个说法",
+            "换种说法", "换个角度", "重新组织", "总结一下", "概括", "简单点",
+            "详细点", "扩写", "扩充", "详细版", "完整版", "调整结构", "修改报告",
+            "修改摘要", "突出重点", "增加一节", "补充一节", "删除一节",
+        ]
+        section_edit = (
+            any(action in prompt for action in ["展开", "增加", "补充", "删除", "删掉", "调整", "修改", "重排", "合并"])
+            and any(target in prompt for target in ["报告", "摘要", "建议", "结论", "章节", "小节", "部分", "内容", "核心要点"])
+        )
         followup_cues = [
             # 提问 / 解释
             "详细", "详解", "讲讲", "讲解", "解释", "展开", "为什么", "为何",
             "怎么理解", "如何理解", "什么意思", "啥意思", "具体说", "具体讲",
             "说说", "解读", "没看懂", "看不懂", "这个结论", "这一点", "这部分",
             "上面", "刚才", "刚刚", "报告里", "这份报告", "那份报告", "怎么得出", "依据",
-            # 改写 / 微调 / 重组
-            "重写", "改写", "重新写", "再写", "润色", "精简", "精简版", "简版",
-            "简洁", "简短", "缩短", "浓缩", "通俗", "白话", "口语", "换个说法",
-            "换种说法", "换个角度", "重新组织", "总结一下", "概括", "简单点", "详细点",
         ]
         if (
+            message_type == MessageType.REPORT_REQUEST
+            and not task_in_prompt
+            and not time_range
+            and (any(cue in prompt for cue in report_edit_cues) or section_edit)
+        ):
+            message_type = MessageType.REPORT_EDIT
+        elif (
             message_type == MessageType.REPORT_REQUEST
             and not task_in_prompt
             and not time_range
@@ -325,7 +339,13 @@ class IntentService:
         # without a task/month in the text — keep it rules-first so it doesn't defer to
         # the LLM and get flipped non-deterministically. Questions are excluded above.
         scenario_cue = self._has_scenario_cue(prompt)
-        if message_type in {MessageType.FREE_CHAT, MessageType.CHANGE_CONTEXT, MessageType.CONFIRMATION, MessageType.FOLLOW_UP}:
+        if message_type in {
+            MessageType.FREE_CHAT,
+            MessageType.CHANGE_CONTEXT,
+            MessageType.CONFIRMATION,
+            MessageType.FOLLOW_UP,
+            MessageType.REPORT_EDIT,
+        }:
             confidence = 0.82
         elif message_type == MessageType.REPORT_REQUEST and scenario_cue:
             confidence = 0.84
@@ -366,9 +386,10 @@ class IntentService:
             MessageType.CHANGE_CONTEXT,
             MessageType.CONFIRMATION,
             MessageType.FOLLOW_UP,
+            MessageType.REPORT_EDIT,
         }:
             intent.message_type = MessageType.REPORT_REQUEST
-        if intent.message_type in {MessageType.FREE_CHAT, MessageType.FOLLOW_UP}:
+        if intent.message_type in {MessageType.FREE_CHAT, MessageType.FOLLOW_UP, MessageType.REPORT_EDIT}:
             intent.missing_fields = []
             intent.confirmation_fields = []
             return intent
