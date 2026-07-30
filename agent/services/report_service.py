@@ -12,6 +12,7 @@ from agent.config import ReportConfig
 from agent.schemas.report import AnalysisResult, ChartAsset, MetricCard, ReportArtifact, ReportRequest
 from agent.services.common import extract_json_object
 from agent.services.llm_provider import DeepSeekProvider, LLMProvider
+from agent.services.report_skeletons import ReportSkeleton, resolve
 
 
 REPORT_TEMPLATE_VERSION = "agent-report-v9"
@@ -173,11 +174,16 @@ class ReportService:
         revision_instruction: str = "",
         previous_context: dict | None = None,
     ) -> dict:
+        skeleton = self._skeleton_for(request, analysis, revision_instruction=revision_instruction)
         system_prompt = (
-            "你是一位资深遥感分析师，正在为业务和管理读者撰写遥感专题分析报告。"
-            "写作要求：结论先行，层次分明，语言专业但通俗易懂；聚焦“数据说明了什么、"
-            "对业务意味着什么、下一步该怎么做”。不要罗列系统参数、接口字段或免责声明，"
-            "不要出现模型文件、服务地址、patch 编号等技术细节。必须忠于给定数据，"
+            "你在为业务读者撰写一份遥感分析报告。"
+            f"这份报告要回答的问题是：{skeleton.question}"
+            f"读者是：{skeleton.audience}"
+            "写作要求：结论先行，把数字翻译成读者能直观理解的说法"
+            "（例如“约三分之一的地面是建筑”而不是“覆盖率36.27%，按面积加权计算”）；"
+            "少用术语，必须出现的技术口径放到最后一节。"
+            "不要罗列系统参数、接口字段或免责声明，不要出现模型文件、服务地址、"
+            "patch 编号等技术细节。必须忠于给定数据，"
             "严禁编造未提供的数字、坐标或事件；不得引入输入中没有的行业阈值、典型范围、"
             "比较基准、因果归因或可靠性评级。没有明确精度证据时，不得声称结果可靠、准确或"
             "可直接替代现场核查。只输出 JSON，不要输出多余文字。"
@@ -201,13 +207,7 @@ class ReportService:
                 "风险线索": analysis.risks,
                 "方法与数据边界": [*analysis.method_notes, *analysis.limitations, *analysis.confidence_notes],
                 "图表": [{"标题": c.title, "说明": c.caption} for c in analysis.charts],
-                "输出格式": {
-                    "summary": "结论先行的执行摘要，160-240字，讲清区域、时间、任务的核心结论与业务价值",
-                    "highlights": "3-5 条核心要点，每条一句话、可独立成立，最重要的结论排在最前",
-                    "analysis": "2-4 个深度解读小节；每节为 {title: 小标题, text: 180-280字的详实分析}，"
-                    "覆盖空间格局、主导特征、值得关注的信号和数据边界；没有空间证据时不要推断聚集性",
-                    "recommendations": "3-5 条可执行的建议或风险提醒，务实、面向行动",
-                },
+                "输出格式": skeleton.output_format(),
                 "禁止": [
                     "不要出现模型文件路径、服务地址、patch 编号、接口字段、坐标系等系统内部信息",
                     "不要出现 mock、占位、模拟、原型等字样",
@@ -227,13 +227,20 @@ class ReportService:
                 # _clean_blocks then rejected → silent template fallback.
                 "章节": self._as_output_blocks((previous_context or {}).get("sections")),
             }
-            payload_data["输出格式"] = self._revision_output_format(revision_instruction)
+            payload_data["输出格式"] = self._revision_output_format(
+                revision_instruction, skeleton=skeleton
+            )
         payload = json.dumps(payload_data, ensure_ascii=False, indent=2)
         text = self.llm.complete(system_prompt, payload)
         if text:
             parsed = extract_json_object(text)
             if parsed:
-                analysis_blocks = self._clean_blocks(parsed.get("analysis"))
+                # Allow the skeleton's own section count (+1 slack) rather than a
+                # fixed cap, so a longer skeleton or an expanded revision is not
+                # silently truncated.
+                analysis_blocks = self._clean_blocks(
+                    parsed.get("analysis"), limit=len(skeleton.section_plan()) + 1
+                )
                 if analysis_blocks:
                     return {
                         "summary": str(parsed.get("summary") or self._fallback_summary(request, analysis)),
@@ -251,6 +258,7 @@ class ReportService:
             analysis,
             revision_instruction=revision_instruction,
             previous_context=previous_context or {},
+            skeleton=skeleton,
         )
 
     # Key aliases the model legitimately uses for a section's heading and prose.
@@ -266,6 +274,29 @@ class ReportService:
             if isinstance(value, str) and value.strip():
                 return value.strip()
         return ""
+
+    @staticmethod
+    def _skeleton_for(
+        request: ReportRequest,
+        analysis: AnalysisResult,
+        *,
+        revision_instruction: str = "",
+    ) -> ReportSkeleton:
+        """Which report shape this analysis gets.
+
+        The scenario is read from the analysis payload the scenario services
+        stamp, so a checkup keeps its own shape no matter what task name it
+        carries. A revision reuses the original's skeleton — an edit changes
+        length and tone, never which questions the report answers.
+        """
+        payload = analysis.aef_payload if isinstance(analysis.aef_payload, dict) else {}
+        return resolve(
+            task=analysis.task or request.task,
+            scenario=str(payload.get("scenario") or ""),
+            custom_object=str(
+                getattr(request, "target_object", "") or payload.get("custom_class") or ""
+            ),
+        )
 
     # Headings for blocks the model returned without one, in order.
     _UNTITLED_BLOCK_TITLES = ("分析解读", "延伸解读", "补充说明", "其他观察", "数据边界")
@@ -325,11 +356,21 @@ class ReportService:
         *,
         revision_instruction: str = "",
         previous_context: dict | None = None,
+        skeleton: ReportSkeleton | None = None,
     ) -> dict:
-        blocks = [{"title": "分析解读", "text": analysis.summary or self._fallback_summary(request, analysis)}]
+        # Borrow the skeleton's headings so a template-generated report still
+        # reads as the right kind of report, rather than a generic 分析解读 stub.
+        headings = [item["heading"] for item in (skeleton or resolve()).section_plan()]
+        blocks = [{
+            "title": headings[0],
+            "text": analysis.summary or self._fallback_summary(request, analysis),
+        }]
         findings = [f for f in analysis.findings if "Agent" not in f and "标准化" not in f]
-        if findings:
-            blocks.append({"title": "主要发现", "text": " ".join(findings[:4])})
+        if findings and len(headings) > 1:
+            blocks.append({"title": headings[1], "text": " ".join(findings[:4])})
+        boundary = [*analysis.limitations, *analysis.confidence_notes]
+        if boundary:
+            blocks.append({"title": headings[-1], "text": " ".join(boundary[:3])})
         content = {
             "summary": self._fallback_summary(request, analysis),
             "highlights": (findings or analysis.findings)[:5],
@@ -365,25 +406,38 @@ class ReportService:
     _BLOCK_CONTRACT = "每节必须是 {title: 小标题, text: 正文} 对象，键名只能用 title 和 text"
 
     @classmethod
-    def _revision_output_format(cls, instruction: str) -> dict[str, str]:
+    def _revision_output_format(
+        cls, instruction: str, *, skeleton: ReportSkeleton | None = None
+    ) -> dict[str, object]:
+        """Output contract for an edit: same questions, different length/tone.
+
+        The skeleton's headings are kept so a 精简版 is a shorter version of *this*
+        report rather than a differently-shaped one; only the section count and
+        per-section length move.
+        """
+        plan = (skeleton or resolve()).section_plan()
+        headings = [item["heading"] for item in plan]
         if cls._is_compact_revision(instruction):
+            # Keep the opening section and always keep the closing caveats.
+            kept = [headings[0], headings[-1]] if len(headings) > 1 else headings
             return {
                 "summary": "80-140字，只保留核心结论、关键数字和最重要业务含义",
                 "highlights": "2-3条核心要点",
-                "analysis": f"1-2个短小节，每节80-140字；{cls._BLOCK_CONTRACT}",
+                "analysis": f"只保留这些小节，顺序不变：{kept}；每节80-140字；{cls._BLOCK_CONTRACT}",
                 "recommendations": "2-3条最重要建议，每条为一个字符串",
             }
         if any(key in instruction for key in ["扩写", "扩充", "详细", "完整"]):
             return {
                 "summary": "200-300字的完整执行摘要",
                 "highlights": "4-6条核心要点",
-                "analysis": f"3-5个深入小节，每节220-360字；{cls._BLOCK_CONTRACT}",
+                "analysis": f"保留全部小节，顺序不变：{headings}；每节220-360字；{cls._BLOCK_CONTRACT}",
                 "recommendations": "4-6条分层、可执行建议，每条为一个字符串",
             }
         return {
             "summary": "严格按照编辑要求重写摘要",
             "highlights": "按照编辑要求组织核心要点",
-            "analysis": f"按照编辑要求调整章节、篇幅、语气和重点；{cls._BLOCK_CONTRACT}",
+            "analysis": f"保留这些小节，顺序不变：{headings}；"
+            f"按编辑要求调整每节的篇幅、语气和重点；{cls._BLOCK_CONTRACT}",
             "recommendations": "保留事实依据并按编辑要求组织建议，每条为一个字符串",
         }
 
