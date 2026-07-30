@@ -753,14 +753,18 @@ class ReportAgent:
         if report_context:
             # Grounded discussion: answer questions about the last report using its
             # actual content, instead of regenerating a report.
+            # Rewrite requests (精简/扩充/润色) are handled by the revise_report
+            # route, which emits a real new report artifact. This node only
+            # discusses the existing one — telling it to also rewrite would
+            # produce a chat-only "new version" the user can't open or download.
             system_prompt = (
-                "你是遥感报告助手。用户正在就上一次生成的遥感分析报告进行追问、讨论或修改。"
-                "请基于下面提供的报告内容满足他的需求：\n"
-                "· 如果是提问，就聚焦那一点详细解释（指标含义、结论依据、空间格局或业务建议）；\n"
-                "· 如果要求换种说法、精简、展开、重写、润色或总结，就据此重新组织相应内容，"
-                "输出层次清晰、语言通俗专业的结果（精简版要短，详细版要展开）。\n"
+                "你是遥感报告助手。用户正在就上一次生成的遥感分析报告进行追问或讨论。"
+                "请基于下面提供的报告内容，聚焦他问的那一点详细解释"
+                "（指标含义、结论依据、空间格局或业务建议）。"
                 "始终忠于报告中的数据，不要编造报告里没有的数字或事实，"
                 "也不要输出系统参数、文件路径或免责声明。"
+                "如果用户想要另一个版本的报告（精简、扩充、改写等），"
+                "就告诉他直接说“精简一下报告”或“详细扩充一下”，你会生成一份新版报告。"
                 "用自然口语、纯文本作答，不要用 Markdown 排版。"
             )
             recent = memory.get("recent_messages") or []
@@ -934,18 +938,31 @@ class ReportAgent:
             return None
 
     def _fallback_chat_response(self, prompt: str) -> str:
+        """Offline reply when the chat LLM is unavailable.
+
+        Must stay consistent with the real coverage across all three regions —
+        an earlier Yajiang-only version told Haidian users the wrong capabilities
+        whenever the LLM was down.
+        """
         text = prompt.strip()
         if any(key in text for key in ["你是谁", "你是什么", "你是什么助手", "你是干什么"]):
             return (
-                "我是雅江遥感报告助手，主要帮你把自然语言需求整理成标准化遥感任务，"
-                "调用 AEF 模型完成地物分类、水体分类或高程地形分析，然后生成带图表的报告。"
+                "我是遥感报告助手，帮你把自然语言需求整理成标准遥感分析任务，"
+                "调用模型完成分析后生成带图表和指标的报告。"
+                "目前覆盖雅江区域、哈尔滨新区和北京市海淀区。"
             )
         if any(key in text for key in ["你能做什么", "你可以做什么", "你会做什么", "功能"]):
             return (
-                "我可以帮你生成地物分类、水体分类和高程地形报告。你只要告诉我地区、任务和月份，"
-                "比如“给我一份去年九月份的水体分类报告”，我会自动补齐流程并生成报告。"
+                "我可以按区域生成遥感专题报告：雅江区域做地物分类、水体分布、高程地形；"
+                "哈尔滨新区做建筑物提取、土地利用分类、水体提取；"
+                "海淀区做建筑物提取、道路提取、施工识别、土地利用与土地覆盖分类、水体提取，"
+                "还支持片区综合体检、建设扰动监测和补绿优先区评分。"
+                "告诉我区域、任务和月份就行，比如“给我一份 2026-03 海淀建筑物提取报告”。"
             )
-        return "我在。你可以直接和我聊天，也可以让我生成地物分类、水体分类或高程地形分析报告。"
+        return (
+            "我在。你可以直接和我聊天，也可以让我生成遥感专题报告"
+            "（雅江、哈尔滨新区、海淀区都支持，告诉我任务和月份即可）。"
+        )
 
     def _run_analysis(self, state: ReportAgentState) -> ReportAgentState:
         intent = state["intent"]
