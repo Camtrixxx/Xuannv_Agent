@@ -55,15 +55,50 @@ class ReportService:
         self.llm = llm or DeepSeekProvider()
 
     def build(self, request: ReportRequest, analysis: AnalysisResult) -> ReportArtifact:
-        title = f"{analysis.headline}报告"
-        slug = self._slug(self._report_identity(request, analysis))
+        return self._build_artifact(request, analysis)
+
+    def revise(
+        self,
+        request: ReportRequest,
+        analysis: AnalysisResult,
+        instruction: str,
+        previous_context: dict | None = None,
+    ) -> ReportArtifact:
+        """Create a new report version from existing analysis, without inference."""
+        revision_id = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        return self._build_artifact(
+            request,
+            analysis,
+            revision_instruction=str(instruction or "").strip(),
+            previous_context=previous_context or {},
+            revision_id=revision_id,
+        )
+
+    def _build_artifact(
+        self,
+        request: ReportRequest,
+        analysis: AnalysisResult,
+        *,
+        revision_instruction: str = "",
+        previous_context: dict | None = None,
+        revision_id: str = "",
+    ) -> ReportArtifact:
+        version_label = self._revision_label(revision_instruction) if revision_instruction else ""
+        title = f"{analysis.headline}{f'·{version_label}' if version_label else ''}报告"
+        identity = self._report_identity(request, analysis)
+        if revision_instruction:
+            identity = f"{identity}-revision-{revision_id}"
+        slug = self._slug(identity)
         html_path = self.report_dir / f"{slug}.html"
         md_path = self.report_dir / f"{slug}.md"
         map_path = self.report_dir / f"{slug}.map.html"
         metrics = self._business_metrics(analysis)
         map_html_url = self._write_map_page(request, analysis, map_path)
+        if revision_instruction and not map_html_url:
+            artifact = (previous_context or {}).get("artifact") or {}
+            map_html_url = str(artifact.get("map_html_url") or "")
 
-        if self.config.reuse_existing and self._can_reuse(html_path, md_path):
+        if not revision_instruction and self.config.reuse_existing and self._can_reuse(html_path, md_path):
             abstract = self._read_existing_abstract(md_path) or self._fallback_summary(request, analysis)
             return ReportArtifact(
                 title=title,
@@ -79,7 +114,13 @@ class ReportService:
                 generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             )
 
-        content = self._generate_content(request, analysis, metrics)
+        content = self._generate_content(
+            request,
+            analysis,
+            metrics,
+            revision_instruction=revision_instruction,
+            previous_context=previous_context or {},
+        )
         llm_status = getattr(self.llm, "last_status", "template")
         llm_provider = "deepseek" if llm_status == "ok" else f"template:{llm_status}"
 
@@ -99,12 +140,25 @@ class ReportService:
             map_html_url=map_html_url,
             llm_provider=llm_provider,
             generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            debug={"llm_status": llm_status, "slug": slug},
+            debug={
+                "llm_status": llm_status,
+                "slug": slug,
+                "revision": bool(revision_instruction),
+                "revision_instruction": revision_instruction,
+            },
         )
 
     # ------------------------------------------------------------------ content
 
-    def _generate_content(self, request: ReportRequest, analysis: AnalysisResult, metrics: list[MetricCard]) -> dict:
+    def _generate_content(
+        self,
+        request: ReportRequest,
+        analysis: AnalysisResult,
+        metrics: list[MetricCard],
+        *,
+        revision_instruction: str = "",
+        previous_context: dict | None = None,
+    ) -> dict:
         system_prompt = (
             "你是一位资深遥感分析师，正在为业务和管理读者撰写遥感专题分析报告。"
             "写作要求：结论先行，层次分明，语言专业但通俗易懂；聚焦“数据说明了什么、"
@@ -114,8 +168,12 @@ class ReportService:
             "比较基准、因果归因或可靠性评级。没有明确精度证据时，不得声称结果可靠、准确或"
             "可直接替代现场核查。只输出 JSON，不要输出多余文字。"
         )
-        payload = json.dumps(
-            {
+        if revision_instruction:
+            system_prompt += (
+                "这是一次已有报告的编辑操作，不得重新分析或改变任何指标。必须按照用户编辑要求调整"
+                "篇幅、结构、语气和重点；未要求修改的事实与结论保持一致。"
+            )
+        payload_data = {
                 "区域": request.region,
                 "任务": analysis.task,
                 "时间": request.time_range,
@@ -143,10 +201,16 @@ class ReportService:
                     "不要用外部常识补充典型阈值、行业平均值或对比基准",
                     "不要把全区域任务可用性摘要解释为本次选区的空间结论",
                 ],
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+            }
+        if revision_instruction:
+            payload_data["报告编辑要求"] = revision_instruction
+            payload_data["上一版报告"] = {
+                "标题": (previous_context or {}).get("title"),
+                "摘要": (previous_context or {}).get("summary"),
+                "章节": (previous_context or {}).get("sections") or [],
+            }
+            payload_data["输出格式"] = self._revision_output_format(revision_instruction)
+        payload = json.dumps(payload_data, ensure_ascii=False, indent=2)
         text = self.llm.complete(system_prompt, payload)
         if text:
             parsed = extract_json_object(text)
@@ -161,7 +225,12 @@ class ReportService:
                             parsed.get("recommendations"), self._merged_actions(analysis)
                         )[:6],
                     }
-        return self._fallback_content(request, analysis)
+        return self._fallback_content(
+            request,
+            analysis,
+            revision_instruction=revision_instruction,
+            previous_context=previous_context or {},
+        )
 
     def _clean_blocks(self, value) -> list[dict[str, str]]:
         blocks: list[dict[str, str]] = []
@@ -176,16 +245,67 @@ class ReportService:
                 blocks.append({"title": title, "text": body})
         return blocks[:4]
 
-    def _fallback_content(self, request: ReportRequest, analysis: AnalysisResult) -> dict:
+    def _fallback_content(
+        self,
+        request: ReportRequest,
+        analysis: AnalysisResult,
+        *,
+        revision_instruction: str = "",
+        previous_context: dict | None = None,
+    ) -> dict:
         blocks = [{"title": "分析解读", "text": analysis.summary or self._fallback_summary(request, analysis)}]
         findings = [f for f in analysis.findings if "Agent" not in f and "标准化" not in f]
         if findings:
             blocks.append({"title": "主要发现", "text": " ".join(findings[:4])})
-        return {
+        content = {
             "summary": self._fallback_summary(request, analysis),
             "highlights": (findings or analysis.findings)[:5],
             "analysis": blocks,
             "recommendations": self._merged_actions(analysis)[:6],
+        }
+        if revision_instruction and self._is_compact_revision(revision_instruction):
+            previous_summary = str((previous_context or {}).get("summary") or content["summary"])
+            content["summary"] = previous_summary[:180]
+            content["highlights"] = content["highlights"][:3]
+            content["analysis"] = content["analysis"][:1]
+            content["recommendations"] = content["recommendations"][:3]
+        return content
+
+    @staticmethod
+    def _is_compact_revision(instruction: str) -> bool:
+        return any(key in instruction for key in ["精简", "简版", "简洁", "简短", "缩短", "浓缩", "概括", "简单点"])
+
+    @classmethod
+    def _revision_label(cls, instruction: str) -> str:
+        if cls._is_compact_revision(instruction):
+            return "精简版"
+        if any(key in instruction for key in ["扩写", "扩充", "详细", "完整"]):
+            return "详细版"
+        if any(key in instruction for key in ["通俗", "白话", "口语"]):
+            return "通俗版"
+        return "修订版"
+
+    @classmethod
+    def _revision_output_format(cls, instruction: str) -> dict[str, str]:
+        if cls._is_compact_revision(instruction):
+            return {
+                "summary": "80-140字，只保留核心结论、关键数字和最重要业务含义",
+                "highlights": "2-3条核心要点",
+                "analysis": "1-2个短小节，每节80-140字",
+                "recommendations": "2-3条最重要建议",
+            }
+        if any(key in instruction for key in ["扩写", "扩充", "详细", "完整"]):
+            return {
+                "summary": "200-300字的完整执行摘要",
+                "highlights": "4-6条核心要点",
+                "analysis": "3-5个深入小节，每节220-360字",
+                "recommendations": "4-6条分层、可执行建议",
+            }
+        return {
+            "summary": "严格按照编辑要求重写摘要",
+            "highlights": "按照编辑要求组织核心要点",
+            "analysis": "按照编辑要求调整章节、篇幅、语气和重点",
+            "recommendations": "保留事实依据并按编辑要求组织建议",
         }
 
     def _fallback_summary(self, request: ReportRequest, analysis: AnalysisResult) -> str:
