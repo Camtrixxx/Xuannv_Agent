@@ -53,6 +53,10 @@ class ReportService:
         self.report_dir = Path(report_dir) if report_dir != "agent/reports" else self.config.report_dir
         self.report_dir.mkdir(parents=True, exist_ok=True)
         self.llm = llm or DeepSeekProvider()
+        # Why the *content* fell back, independent of transport health. A call can
+        # return HTTP 200 ("ok") yet carry JSON we can't use, in which case the
+        # report is template-generated — that must not be reported as "deepseek".
+        self.last_content_status = "not_called"
 
     def build(self, request: ReportRequest, analysis: AnalysisResult) -> ReportArtifact:
         return self._build_artifact(request, analysis)
@@ -114,6 +118,7 @@ class ReportService:
                 generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             )
 
+        self.last_content_status = "ok"
         content = self._generate_content(
             request,
             analysis,
@@ -122,7 +127,15 @@ class ReportService:
             previous_context=previous_context or {},
         )
         llm_status = getattr(self.llm, "last_status", "template")
-        llm_provider = "deepseek" if llm_status == "ok" else f"template:{llm_status}"
+        content_status = self.last_content_status
+        if llm_status == "ok" and content_status == "ok":
+            llm_provider = "deepseek"
+        elif llm_status == "ok":
+            # Transport succeeded but the content was unusable — this report is
+            # template-generated and must say so.
+            llm_provider = f"template:{content_status}"
+        else:
+            llm_provider = f"template:{llm_status}"
 
         html_path.write_text(self._render_html(title, content, analysis, metrics), encoding="utf-8")
         md_path.write_text(self._render_markdown(title, content, analysis, metrics), encoding="utf-8")
@@ -142,6 +155,7 @@ class ReportService:
             generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             debug={
                 "llm_status": llm_status,
+                "content_status": content_status,
                 "slug": slug,
                 "revision": bool(revision_instruction),
                 "revision_instruction": revision_instruction,
@@ -207,7 +221,11 @@ class ReportService:
             payload_data["上一版报告"] = {
                 "标题": (previous_context or {}).get("title"),
                 "摘要": (previous_context or {}).get("summary"),
-                "章节": (previous_context or {}).get("sections") or [],
+                # Normalize to the same {title, text} keys the output format asks
+                # for. The stored artifact uses {heading, body}; feeding those in
+                # verbatim taught the model to answer in *those* keys, which
+                # _clean_blocks then rejected → silent template fallback.
+                "章节": self._as_output_blocks((previous_context or {}).get("sections")),
             }
             payload_data["输出格式"] = self._revision_output_format(revision_instruction)
         payload = json.dumps(payload_data, ensure_ascii=False, indent=2)
@@ -225,6 +243,9 @@ class ReportService:
                             parsed.get("recommendations"), self._merged_actions(analysis)
                         )[:6],
                     }
+                self.last_content_status = "unusable_blocks"
+            else:
+                self.last_content_status = "unparsable_json"
         return self._fallback_content(
             request,
             analysis,
@@ -232,18 +253,70 @@ class ReportService:
             previous_context=previous_context or {},
         )
 
-    def _clean_blocks(self, value) -> list[dict[str, str]]:
+    # Key aliases the model legitimately uses for a section's heading and prose.
+    # "heading"/"body" in particular is what the stored artifact uses, so a
+    # revision prompt echoing the previous version invites that spelling back.
+    _BLOCK_TITLE_KEYS = ("title", "heading", "小标题", "标题")
+    _BLOCK_TEXT_KEYS = ("text", "body", "content", "正文", "内容")
+
+    @classmethod
+    def _first_str(cls, item: dict, keys) -> str:
+        for key in keys:
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    # Headings for blocks the model returned without one, in order.
+    _UNTITLED_BLOCK_TITLES = ("分析解读", "延伸解读", "补充说明", "其他观察", "数据边界")
+
+    def _clean_blocks(self, value, *, limit: int = 5) -> list[dict[str, str]]:
+        """Normalize the model's ``analysis`` field into ``{title, text}`` blocks.
+
+        Three shapes occur in practice and all carry real content: a list of
+        heading/body objects, a list of bare paragraphs, and — for terse
+        revisions — a single prose string. Accepting only the first shape meant a
+        good response was dropped and the template silently rendered instead.
+        """
+        if isinstance(value, str):
+            value = [value]
         blocks: list[dict[str, str]] = []
         if not isinstance(value, list):
             return blocks
+        untitled = 0
         for item in value:
+            if isinstance(item, dict):
+                title = self._first_str(item, self._BLOCK_TITLE_KEYS)
+                body = self._first_str(item, self._BLOCK_TEXT_KEYS)
+            elif isinstance(item, str):
+                title, body = "", item.strip()
+            else:
+                continue
+            # Prose without a heading is still usable; only a body-less block is
+            # worthless. Untitled blocks get distinct generic headings so the
+            # report never shows the same heading twice.
+            if not body:
+                continue
+            if not title:
+                title = self._UNTITLED_BLOCK_TITLES[
+                    min(untitled, len(self._UNTITLED_BLOCK_TITLES) - 1)
+                ]
+                untitled += 1
+            blocks.append({"title": title, "text": body})
+        return blocks[:limit]
+
+    @classmethod
+    def _as_output_blocks(cls, sections) -> list[dict[str, str]]:
+        """Restate stored {heading, body} sections in the {title, text} shape."""
+        blocks: list[dict[str, str]] = []
+        for item in sections or []:
             if not isinstance(item, dict):
                 continue
-            title = str(item.get("title") or "").strip()
-            body = str(item.get("text") or "").strip()
-            if title and body:
-                blocks.append({"title": title, "text": body})
-        return blocks[:4]
+            blocks.append({
+                "title": cls._first_str(item, cls._BLOCK_TITLE_KEYS),
+                "text": cls._first_str(item, cls._BLOCK_TEXT_KEYS),
+            })
+        return blocks
 
     def _fallback_content(
         self,
@@ -285,27 +358,33 @@ class ReportService:
             return "通俗版"
         return "修订版"
 
+    # Every revision variant restates the section contract, because a terse
+    # instruction ("精简") otherwise invites a bare prose string instead of
+    # titled sections, and echoing the previous version invites its own
+    # heading/body key names back.
+    _BLOCK_CONTRACT = "每节必须是 {title: 小标题, text: 正文} 对象，键名只能用 title 和 text"
+
     @classmethod
     def _revision_output_format(cls, instruction: str) -> dict[str, str]:
         if cls._is_compact_revision(instruction):
             return {
                 "summary": "80-140字，只保留核心结论、关键数字和最重要业务含义",
                 "highlights": "2-3条核心要点",
-                "analysis": "1-2个短小节，每节80-140字",
-                "recommendations": "2-3条最重要建议",
+                "analysis": f"1-2个短小节，每节80-140字；{cls._BLOCK_CONTRACT}",
+                "recommendations": "2-3条最重要建议，每条为一个字符串",
             }
         if any(key in instruction for key in ["扩写", "扩充", "详细", "完整"]):
             return {
                 "summary": "200-300字的完整执行摘要",
                 "highlights": "4-6条核心要点",
-                "analysis": "3-5个深入小节，每节220-360字",
-                "recommendations": "4-6条分层、可执行建议",
+                "analysis": f"3-5个深入小节，每节220-360字；{cls._BLOCK_CONTRACT}",
+                "recommendations": "4-6条分层、可执行建议，每条为一个字符串",
             }
         return {
             "summary": "严格按照编辑要求重写摘要",
             "highlights": "按照编辑要求组织核心要点",
-            "analysis": "按照编辑要求调整章节、篇幅、语气和重点",
-            "recommendations": "保留事实依据并按编辑要求组织建议",
+            "analysis": f"按照编辑要求调整章节、篇幅、语气和重点；{cls._BLOCK_CONTRACT}",
+            "recommendations": "保留事实依据并按编辑要求组织建议，每条为一个字符串",
         }
 
     def _fallback_summary(self, request: ReportRequest, analysis: AnalysisResult) -> str:
@@ -326,10 +405,27 @@ class ReportService:
     def _business_metrics(self, analysis: AnalysisResult) -> list[MetricCard]:
         return [m for m in analysis.metrics if m.label not in _META_METRIC_LABELS]
 
+    # Keys the model uses when it returns a recommendation as an object rather
+    # than a plain string (e.g. {"priority": "高", "action": "..."}).
+    _ITEM_TEXT_KEYS = ("action", "text", "content", "建议", "内容", "描述", "title")
+    _ITEM_LABEL_KEYS = ("priority", "优先级", "level", "等级")
+
     def _list_or_default(self, value, default: list[str]) -> list[str]:
         if not isinstance(value, list):
             return default
-        items = [str(item).strip() for item in value if str(item).strip()]
+        items: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                # Never let a raw dict repr reach the report body.
+                text = self._first_str(item, self._ITEM_TEXT_KEYS)
+                if not text:
+                    continue
+                label = self._first_str(item, self._ITEM_LABEL_KEYS)
+                items.append(f"[{label}] {text}" if label else text)
+                continue
+            text = str(item).strip()
+            if text:
+                items.append(text)
         return items or default
 
     # ------------------------------------------------------------------- render
