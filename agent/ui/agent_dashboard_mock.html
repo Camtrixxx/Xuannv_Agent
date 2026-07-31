@@ -1588,12 +1588,12 @@
       `;
     }
 
-    function eventTime(value) {
+    function eventTime(value, fallback = 0) {
       if (!value) {
-        return 0;
+        return fallback;
       }
       const parsed = Date.parse(value);
-      return Number.isFinite(parsed) ? parsed : 0;
+      return Number.isFinite(parsed) ? parsed : fallback;
     }
 
     function dedupeReports(reports) {
@@ -1608,57 +1608,45 @@
       });
     }
 
+    // Messages and reports arrive as two separate arrays (recent_messages is
+    // oldest-first, reports is newest-first). Both carry created_at, so we
+    // merge them into one timeline sorted by time instead of guessing which
+    // assistant message produced which report from its wording.
+    function buildSessionTimeline(memory) {
+      const events = (memory.recent_messages || []).map((message) => ({
+        type: "message",
+        time: eventTime(message.created_at),
+        message
+      }));
+      dedupeReports(memory.reports || []).forEach((report) => {
+        events.push({
+          type: "report",
+          // A report with no timestamp can't be placed; keep it at the end
+          // rather than dumping it at the top of the conversation.
+          time: eventTime(report.created_at, Number.POSITIVE_INFINITY),
+          report
+        });
+      });
+      // Array.prototype.sort is stable, so same-timestamp events keep their
+      // original relative order. The tie-break puts the assistant reply before
+      // the report card it announces.
+      return events
+        .map((event, index) => ({ event, index }))
+        .sort((left, right) => (
+          left.event.time - right.event.time
+          || (left.event.type === right.event.type ? 0 : (left.event.type === "message" ? -1 : 1))
+          || left.index - right.index
+        ))
+        .map((entry) => entry.event);
+    }
+
     function restoreMessages(memory) {
-      const recent = memory.recent_messages || [];
-      const reports = dedupeReports(memory.reports || []);
-      if (!recent.length) {
-        messages.innerHTML = reports.length
-          ? reports.map(renderHistoryReportCard).join("")
-          : '<div class="msg agent">已切换到这个会话，可以继续输入需求。</div>';
+      const events = buildSessionTimeline(memory);
+      if (!events.length) {
+        messages.innerHTML = '<div class="msg agent">已切换到这个会话，可以继续输入需求。</div>';
         messages.scrollTop = messages.scrollHeight;
         return;
       }
-      const events = recent.map((message, index) => ({
-        type: "message",
-        time: eventTime(message.created_at),
-        index,
-        message
-      }));
-      const reportEvents = reports.map((report, index) => ({
-        type: "report",
-        time: eventTime(report.created_at),
-        index,
-        report
-      }));
-      const insertedReports = new Set();
-
-      reportEvents.forEach((reportEvent) => {
-        let targetIndex = -1;
-        let targetDistance = Number.POSITIVE_INFINITY;
-        events.forEach((event, eventIndex) => {
-          if (event.type !== "message" || event.message.role !== "assistant") {
-            return;
-          }
-          if (!String(event.message.content || "").includes("报告已生成")) {
-            return;
-          }
-          const distance = Math.abs(event.time - reportEvent.time);
-          if (distance < targetDistance) {
-            targetDistance = distance;
-            targetIndex = eventIndex;
-          }
-        });
-        if (targetIndex >= 0) {
-          events.splice(targetIndex + 1, 0, reportEvent);
-          insertedReports.add(reportEvent.index);
-        }
-      });
-
-      reportEvents.forEach((reportEvent) => {
-        if (!insertedReports.has(reportEvent.index)) {
-          events.push(reportEvent);
-        }
-      });
 
       messages.innerHTML = events.map((event) => (
         event.type === "message" ? messageToHtml(event.message) : renderHistoryReportCard(event.report)
