@@ -83,6 +83,11 @@ def binary_change(
         "lost_px": lost_px,
         "stayed_px": stayed_px,
         "net_px": after_px - before_px,
+        # Not one pixel moved either way. Real ground change over months
+        # essentially never lands here, so this flags "the two inputs were the
+        # same image" — which callers must report as *unmeasured*, not as
+        # measured stability.
+        "identical": gained_px == 0 and lost_px == 0,
         "before_ha": _ha(before_px),
         "after_ha": _ha(after_px),
         "gained_ha": _ha(gained_px),
@@ -123,12 +128,15 @@ def aggregate_change(per_patch: Iterable[dict[str, Any]]) -> dict[str, Any]:
     reflects how many patches contributed.
     """
     patch_count = 0
+    identical_count = 0
     gained_ha = lost_ha = before_ha = after_ha = 0.0
     have_area = False
     for row in per_patch:
         if not row:
             continue
         patch_count += 1
+        if row.get("identical"):
+            identical_count += 1
         for key, acc in (("gained_ha", "g"), ("lost_ha", "l"), ("before_ha", "b"), ("after_ha", "a")):
             val = row.get(key)
             if val is None:
@@ -147,6 +155,11 @@ def aggregate_change(per_patch: Iterable[dict[str, Any]]) -> dict[str, Any]:
     growth_ratio = round((after_ha - before_ha) / before_ha, 4) if have_area and before_ha > 0 else None
     return {
         "patch_count": patch_count,
+        "identical_patch_count": identical_count,
+        # Every contributing patch came back pixel-identical across the two
+        # dates. That is a property of the *inputs*, not of the ground: it means
+        # this comparison measured nothing and must not be presented as "stable".
+        "all_identical": patch_count > 0 and identical_count == patch_count,
         "before_area_ha": round(before_ha, 2) if have_area else None,
         "after_area_ha": round(after_ha, 2) if have_area else None,
         "gained_area_ha": round(gained_ha, 2) if have_area else None,

@@ -90,6 +90,44 @@ def test_aggregate_change_empty():
     assert out["patch_count"] == 0
     assert out["net_area_ha"] is None
     assert out["growth_ratio"] is None
+    assert out["all_identical"] is False  # nothing compared is not "identical"
+
+
+def test_binary_change_flags_pixel_identical_dates():
+    """Zero movement in both directions means the two dates were one image.
+
+    Upstream 施工识别 currently returns the same PNG for every month, so this is
+    the signal that separates "measured no change" from "measured nothing".
+    """
+    mask = np.zeros((4, 4), dtype=bool)
+    mask[0, :2] = True
+    out = binary_change(mask, mask.copy(), 100.0)
+    assert out["identical"] is True
+    assert out["gained_px"] == 0 and out["lost_px"] == 0
+
+    moved = mask.copy()
+    moved[1, 0] = True
+    assert binary_change(mask, moved, 100.0)["identical"] is False
+
+
+def test_binary_change_identical_holds_for_empty_masks():
+    empty = np.zeros((4, 4), dtype=bool)
+    assert binary_change(empty, empty.copy(), 100.0)["identical"] is True
+
+
+def test_aggregate_change_reports_when_every_patch_was_identical():
+    same = {"before_ha": 10.0, "after_ha": 10.0, "gained_ha": 0.0, "lost_ha": 0.0, "identical": True}
+    out = aggregate_change([same, dict(same)])
+    assert out["identical_patch_count"] == 2
+    assert out["all_identical"] is True
+
+    # One patch that genuinely moved is enough to make the run measurable.
+    mixed = aggregate_change([
+        same,
+        {"before_ha": 10.0, "after_ha": 12.0, "gained_ha": 2.0, "lost_ha": 0.0, "identical": False},
+    ])
+    assert mixed["identical_patch_count"] == 1
+    assert mixed["all_identical"] is False
 
 
 def test_change_rgba_colours_gained_and_lost():
