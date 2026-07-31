@@ -138,8 +138,19 @@ class ReportService:
         else:
             llm_provider = f"template:{llm_status}"
 
-        html_path.write_text(self._render_html(title, content, analysis, metrics), encoding="utf-8")
-        md_path.write_text(self._render_markdown(title, content, analysis, metrics), encoding="utf-8")
+        # A shortening must shrink the whole document, not just the prose the
+        # model writes. The data section (distribution rows + per-patch table) is
+        # assembled by the renderer straight from `analysis`, so without this it
+        # stayed byte-identical and a 精简版 came out only ~20% smaller overall.
+        compact_level = self._compact_level(revision_instruction) if revision_instruction else 0
+        html_path.write_text(
+            self._render_html(title, content, analysis, metrics, compact_level=compact_level),
+            encoding="utf-8",
+        )
+        md_path.write_text(
+            self._render_markdown(title, content, analysis, metrics, compact_level=compact_level),
+            encoding="utf-8",
+        )
         self._prune_reports()
 
         sections = [{"heading": block["title"], "body": block["text"]} for block in content["analysis"]]
@@ -518,13 +529,38 @@ class ReportService:
 
     # ------------------------------------------------------------------- render
 
+    # How much of the data section survives at each shortening level: the metric
+    # grid is the report's headline evidence and always stays; the per-patch table
+    # is detail a 精简版 reader explicitly asked to lose.
+    # Level 2 keeps a single row purely so the "其余 N 个" note still renders —
+    # dropping the table entirely would read as "this run had no patch data".
+    _COMPACT_TABLE_ROWS = {0: None, 1: 5, 2: 1}
+
+    def _compact_data(self, analysis: AnalysisResult, level: int) -> tuple[list, list, bool]:
+        """Distribution rows, patch rows, and whether to keep figures."""
+        table = list(analysis.data_table)
+        patches = list(analysis.patch_results)
+        if level <= 0:
+            return table, patches, True
+        limit = self._COMPACT_TABLE_ROWS.get(level, 5)
+        if limit is not None:
+            patches = patches[:limit]
+        if level >= 2:
+            # Keep the distribution (it carries the headline number) but drop the
+            # long tail; keep figures, since an image is what a skim-reader looks at.
+            table = table[:4]
+        return table, patches, True
+
     def _render_html(
         self,
         title: str,
         content: dict,
         analysis: AnalysisResult,
         metrics: list[MetricCard],
+        *,
+        compact_level: int = 0,
     ) -> str:
+        data_table, patch_results, _ = self._compact_data(analysis, compact_level)
         chips = "".join(
             f"<span>{html.escape(text)}</span>"
             for text in (analysis.region, analysis.task, analysis.time_range)
@@ -542,8 +578,8 @@ class ReportService:
             f"""<figcaption><b>{html.escape(c.title)}</b>{html.escape(c.caption)}</figcaption></figure>"""
             for c in analysis.charts
         )
-        table_html = self._distribution_html(analysis)
-        patch_detail_html = self._patch_results_html(analysis)
+        table_html = self._distribution_html(analysis, data_table)
+        patch_detail_html = self._patch_results_html(analysis, patch_results)
         analysis_html = "".join(
             f"""<section class="block"><h3>{html.escape(b["title"])}</h3><p>{html.escape(b["text"])}</p></section>"""
             for b in content["analysis"]
@@ -664,8 +700,9 @@ class ReportService:
 </html>
 """
 
-    def _distribution_html(self, analysis: AnalysisResult) -> str:
-        if not analysis.data_table:
+    def _distribution_html(self, analysis: AnalysisResult, rows_data: list | None = None) -> str:
+        rows_data = analysis.data_table if rows_data is None else rows_data
+        if not rows_data:
             return ""
         rows = "".join(
             f"""<div class="row"><span>{html.escape(str(r.get('label')))}</span>"""
@@ -673,16 +710,18 @@ class ReportService:
             f"""<span class="pct">{float(r.get('ratio') or 0) * 100:.1f}%</span>"""
             + (f"""<span class="area">{float(r.get('value')):.1f} 公顷</span>""" if r.get("value") is not None else "")
             + "</div>"
-            for r in analysis.data_table
+            for r in rows_data
         )
         title = html.escape(analysis.data_table_title or "数据分布")
         return f"""<h3 style="margin:22px 0 4px;font-size:15px;">{title}</h3><div class="dist">{rows}</div>"""
 
-    def _patch_results_html(self, analysis: AnalysisResult) -> str:
-        if not analysis.patch_results:
+    def _patch_results_html(self, analysis: AnalysisResult, rows_data: list | None = None) -> str:
+        rows_data = analysis.patch_results if rows_data is None else rows_data
+        if not rows_data:
             return ""
+        omitted = len(analysis.patch_results) - len(rows_data)
         rows = []
-        for item in analysis.patch_results:
+        for item in rows_data:
             patch_id = html.escape(str(item.get("patch_id") or "暂无"))
             status = str(item.get("status") or "unknown")
             if status == "ok":
@@ -699,6 +738,13 @@ class ReportService:
                 measure = str(item.get("error") or "获取失败")
                 status_html = '<span class="patch-failed">未完成</span>'
             rows.append(f"<tr><td>{patch_id}</td><td>{status_html}</td><td>{html.escape(measure)}</td></tr>")
+        if omitted > 0:
+            # Say what was dropped — a silently shortened table reads as the
+            # complete picture.
+            rows.append(
+                f'<tr><td colspan="3" style="color:var(--muted);">'
+                f"其余 {omitted} 个 patch 明细见完整版报告</td></tr>"
+            )
         return (
             '<h3 style="margin:22px 0 4px;font-size:15px;">Patch 处理明细</h3>'
             '<table class="patch-table"><thead><tr><th>Patch</th><th>状态</th><th>结果</th></tr></thead>'
@@ -711,7 +757,10 @@ class ReportService:
         content: dict,
         analysis: AnalysisResult,
         metrics: list[MetricCard],
+        *,
+        compact_level: int = 0,
     ) -> str:
+        data_table, patch_results, _ = self._compact_data(analysis, compact_level)
         lines = [f"<!-- {REPORT_TEMPLATE_VERSION} -->", "", f"# {title}", ""]
         chips = " · ".join(t for t in (analysis.region, analysis.task, analysis.time_range) if t)
         if chips:
@@ -730,18 +779,18 @@ class ReportService:
                 lines.append(f"- **{m.label}**：{m.value}{suffix}")
             lines.append("")
 
-        if analysis.charts or analysis.data_table or analysis.patch_results:
+        if analysis.charts or data_table or patch_results:
             lines += ["## 结果图与数据", ""]
             for c in analysis.charts:
                 lines += [f"![{c.title}]({c.url})", "", f"*{c.caption}*", ""]
-            if analysis.data_table:
+            if data_table:
                 lines += [f"### {analysis.data_table_title or '数据分布'}", "", "| 类别 | 占比 |", "| --- | --- |"]
-                for r in analysis.data_table:
+                for r in data_table:
                     lines.append(f"| {r.get('label')} | {float(r.get('ratio') or 0) * 100:.1f}% |")
                 lines.append("")
-            if analysis.patch_results:
+            if patch_results:
                 lines += ["### Patch 处理明细", "", "| Patch | 状态 | 结果 |", "| --- | --- | --- |"]
-                for item in analysis.patch_results:
+                for item in patch_results:
                     status = "已完成" if item.get("status") == "ok" else "未完成"
                     metrics = item.get("metrics") or {}
                     ratio = metrics.get("coverage_ratio", metrics.get("foreground_ratio"))
@@ -752,6 +801,9 @@ class ReportService:
                     else:
                         result = str(item.get("error") or "已获取结果")
                     lines.append(f"| {item.get('patch_id', '暂无')} | {status} | {result} |")
+                omitted = len(analysis.patch_results) - len(patch_results)
+                if omitted > 0:
+                    lines.append(f"| … | | 其余 {omitted} 个 patch 明细见完整版报告 |")
                 lines.append("")
 
         lines += ["## 深度解读", ""]
