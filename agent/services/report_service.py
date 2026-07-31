@@ -389,9 +389,29 @@ class ReportService:
     def _is_compact_revision(instruction: str) -> bool:
         return any(key in instruction for key in ["精简", "简版", "简洁", "简短", "缩短", "浓缩", "概括", "简单点"])
 
+    # Words that mean "shorter than the last shortening". Without a second level,
+    # "再精简一点" produced a byte-for-byte rerun of "精简一下" — the same contract,
+    # so the same output, which reads as the edit having been ignored.
+    _COMPACT_INTENSIFIERS = ("再", "还要", "更", "特别", "极", "最", "非常", "超", "一句话", "太长")
+
+    @classmethod
+    def _compact_level(cls, instruction: str) -> int:
+        """0 = not a shortening, 1 = shorten, 2 = shorten hard."""
+        if not cls._is_compact_revision(instruction):
+            # "再短一点" is a shortening even without the word 精简.
+            if any(key in instruction for key in ("短一点", "短些", "太长")):
+                return 2
+            return 0
+        return 2 if any(key in instruction for key in cls._COMPACT_INTENSIFIERS) else 1
+
     @classmethod
     def _revision_label(cls, instruction: str) -> str:
-        if cls._is_compact_revision(instruction):
+        level = cls._compact_level(instruction)
+        if level >= 2:
+            # Distinct from 精简版, so two successive shortenings are tellable
+            # apart in the report list instead of showing the same title twice.
+            return "极简版"
+        if level == 1:
             return "精简版"
         if any(key in instruction for key in ["扩写", "扩充", "详细", "完整"]):
             return "详细版"
@@ -417,13 +437,27 @@ class ReportService:
         """
         plan = (skeleton or resolve()).section_plan()
         headings = [item["heading"] for item in plan]
-        if cls._is_compact_revision(instruction):
+        level = cls._compact_level(instruction)
+        if level >= 2:
+            # "再精简一点" — one section plus the caveats, and the caveats shrink to
+            # a single sentence. Budgets are stated as upper bounds ("不超过"),
+            # because a range invites the model to write to its top end.
+            kept = [headings[0], headings[-1]] if len(headings) > 1 else headings
+            return {
+                "summary": "不超过60字，一两句话给出最核心的结论和关键数字",
+                "highlights": "最多2条，每条不超过20字",
+                "analysis": f"只保留这些小节，顺序不变：{kept}；"
+                f"『{kept[0]}』不超过80字，『{kept[-1]}』不超过50字且只讲最关键的一条边界；"
+                f"{cls._BLOCK_CONTRACT}",
+                "recommendations": "最多2条，每条不超过25字，只留最重要的",
+            }
+        if level == 1:
             # Keep the opening section and always keep the closing caveats.
             kept = [headings[0], headings[-1]] if len(headings) > 1 else headings
             return {
-                "summary": "80-140字，只保留核心结论、关键数字和最重要业务含义",
-                "highlights": "2-3条核心要点",
-                "analysis": f"只保留这些小节，顺序不变：{kept}；每节80-140字；{cls._BLOCK_CONTRACT}",
+                "summary": "不超过90字，只保留核心结论、关键数字和最重要业务含义",
+                "highlights": "2-3条核心要点，每条不超过25字",
+                "analysis": f"只保留这些小节，顺序不变：{kept}；每节不超过110字；{cls._BLOCK_CONTRACT}",
                 "recommendations": "2-3条最重要建议，每条为一个字符串",
             }
         if any(key in instruction for key in ["扩写", "扩充", "详细", "完整"]):
