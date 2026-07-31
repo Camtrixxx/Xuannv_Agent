@@ -142,6 +142,41 @@ def test_change_skips_patches_missing_a_date(monkeypatch):
         svc.analyze(_req())
 
 
+def test_identical_dates_are_reported_as_unmeasured_not_stable(monkeypatch):
+    """Upstream 施工识别 serves one PNG for every month (verified 2026-07).
+
+    Reporting that as 基本持平 claims stability we never measured, so the run has
+    to say the comparison produced nothing instead.
+    """
+    patches = [{"patch_id": "p1", "bounds": BOUNDS}, {"patch_id": "p2", "bounds": BOUNDS}]
+    same = _img(10)
+    svc = _svc_with(monkeypatch, patches, {"202512": same, "202605": same.copy()})
+
+    result = svc.analyze(_req())
+
+    assert result.aef_payload["unmeasured"] is True
+    assert result.aef_payload["aggregate"]["all_identical"] is True
+    assert "基本持平" not in result.summary
+    assert "完全相同" in result.summary
+    # The caveat has to be findable without reading the prose.
+    assert any("⚠️" in item and "未按月更新" in item for item in result.limitations)
+    # No spatial claim: with identical inputs there is no "top mover" to name.
+    assert not any("最显著" in f for f in result.findings)
+    assert any("确认" in r for r in result.recommendations)
+
+
+def test_one_moving_patch_keeps_the_normal_change_report(monkeypatch):
+    patches = [{"patch_id": "p1", "bounds": BOUNDS}, {"patch_id": "p2", "bounds": BOUNDS}]
+    svc = _svc_with(monkeypatch, patches, {"202512": _img(10), "202605": _img(30)})
+
+    result = svc.analyze(_req())
+
+    assert result.aef_payload["unmeasured"] is False
+    assert result.aef_payload["aggregate"]["all_identical"] is False
+    assert "扩张" in result.summary
+    assert not any("⚠️" in item for item in result.limitations)
+
+
 # ------------------------------------------------------------ intent routing
 
 def _scenario(prompt):

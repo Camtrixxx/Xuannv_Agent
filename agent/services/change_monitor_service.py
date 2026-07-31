@@ -226,6 +226,9 @@ class ChangeMonitorService:
         span = f"{b_disp} → {a_disp}"
         net = agg["net_area_ha"]
         gained, lost = agg["gained_area_ha"], agg["lost_area_ha"]
+        # When every patch's two dates came back pixel-identical, we measured
+        # nothing — saying 基本持平 would report stability we never observed.
+        unmeasured = bool(agg.get("all_identical"))
         trend = "扩张" if (net or 0) > 0 else ("收缩" if (net or 0) < 0 else "基本持平")
 
         metrics = [
@@ -251,16 +254,27 @@ class ChangeMonitorService:
             time_range=span,
             headline=f"{region}{span} {name}建设扰动监测",
             summary=(
+                f"{region}框选片区 {span} 的{name}对比未能得出变化结论："
+                f"{agg['patch_count']} 个 patch 的两期结果完全相同，"
+                "说明上游两期专题结果是同一份数据，本次比对没有测到任何变化。"
+                if unmeasured else
                 f"{region}框选片区 {span} 的{name}变化：净变化约 {net:+.0f} 公顷"
                 f"（新增 {gained:.0f}、减少 {lost:.0f}），整体呈{trend}态势。"
                 if net is not None else f"{region}框选片区 {span} 的{name}变化监测。"
             ),
             metrics=metrics,
             findings=self._findings(name, span, agg, rows, trend),
-            recommendations=[
-                f"建议对净增最显著的 patch（见清单）实地核验是否为新建设或施工扰动。",
-                "如需更细节奏，可在月内多期之间逐月比对，捕捉短周期扰动过程。",
-            ],
+            recommendations=(
+                [
+                    f"本次结果不能作为{name}变化的依据，请先与数据方确认该任务是否已按月更新。",
+                    "如需立即得到可用结论，可改用同区其他按月更新的任务，或改为跨年度对比。",
+                ]
+                if unmeasured else
+                [
+                    f"建议对净增最显著的 patch（见清单）实地核验是否为新建设或施工扰动。",
+                    "如需更细节奏，可在月内多期之间逐月比对，捕捉短周期扰动过程。",
+                ]
+            ),
             narrative_blocks=[
                 {
                     "title": "监测范围与口径",
@@ -273,7 +287,7 @@ class ChangeMonitorService:
             ],
             risks=self._risks(agg),
             method_notes=self._method_notes(task_id, before, after, model_id, name, model_info),
-            limitations=self._limitations(model_id, before, after, model_info),
+            limitations=self._limitations(model_id, before, after, model_info, unmeasured=unmeasured),
             confidence_notes=[
                 "两期专题结果均来自在线海淀 embedding-api，PNG 逐像素对齐（128×128）。",
                 "变化统计为 Agent 从结果图计算的轻量指标，正式评估仍需接入标签或评估接口。",
@@ -285,6 +299,9 @@ class ChangeMonitorService:
                 "task_id": task_id,
                 "before": before,
                 "after": after,
+                # Lets the frontend grey out / annotate a comparison that
+                # measured nothing, instead of drawing a flat trend line.
+                "unmeasured": unmeasured,
                 "aggregate": agg,
                 "top_patches": rows[:10],
                 "custom_model_id": model_id,
@@ -302,6 +319,13 @@ class ChangeMonitorService:
     def _findings(self, name, span, agg, rows, trend) -> list[str]:
         out: list[str] = []
         net = agg["net_area_ha"]
+        if agg.get("all_identical"):
+            # No spatial claims here: with identical inputs there is nothing to
+            # locate, and a "净增最显著片区" would be pure noise.
+            return [
+                f"{span} 两期{name}结果逐像素完全一致，{agg['patch_count']} 个 patch 无一例外。",
+                "这不是“该片区没有变化”，而是两期取到了同一份专题结果，变化无法测量。",
+            ]
         if net is not None:
             out.append(f"{span} 期间{name}净变化约 {net:+.0f} 公顷，整体{trend}。")
             out.append(f"其中新增约 {agg['gained_area_ha']:.0f} 公顷，减少约 {agg['lost_area_ha']:.0f} 公顷。")
@@ -370,11 +394,22 @@ class ChangeMonitorService:
         b, a = digits(before), digits(after)
         return len(b) >= 4 and len(a) >= 4 and b[:4] == a[:4]
 
-    def _limitations(self, model_id, before="", after="", model_info=None) -> list[str]:
+    def _limitations(self, model_id, before="", after="", model_info=None, *, unmeasured=False) -> list[str]:
         common = [
             "变化来自两期模型输出之差，模型逐期误差会叠加为伪变化，显著斑块建议实地核验。",
             "面积按整块 patch 聚合，AOI 边界未做像素级裁剪，边缘片区略有高估。",
         ]
+        if unmeasured:
+            # Same class of defect as the AEF annual-feature case below: the two
+            # dates resolve to one image, so every number here is 0 by
+            # construction. Lead with it — a reader who misses this would take
+            # "净变化 +0 公顷" as evidence the area is stable.
+            common.insert(
+                0,
+                "⚠️ 本次两期专题结果逐像素完全相同，上游该任务在所选月份区间内未按月更新，"
+                "因此全部变化指标恒为 0，不能据此判断片区是否稳定；"
+                "请与数据方确认该任务的更新周期，或改用其他按月更新的任务/跨年度对比。",
+            )
         if model_id:
             common.insert(
                 0,
