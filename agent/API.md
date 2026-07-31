@@ -419,6 +419,22 @@ function updateMapPanel(payload) {
 - **场景 C（`score`）** 每项：`{rank, patch_id, score, band(高压/中压/低压), impervious_ratio, green_ratio, bounds}`。注意这里的 `bounds` 是 **UTM 投影坐标**（米），**不是经纬度**；若要在经纬度地图上高亮该 patch，请优先使用对应结果图层的 `bounds_wgs84`，或用 `patch_id` 去 `/api/patches/search` 的结果里取 `bounds_wgs84`。
 - **场景 B（`change`）** 每项：`{label(=patch_id), gained_ha, lost_ha, net_ha, ratio}`，按净变化排序；不含坐标，如需高亮同样用 `patch_id` 关联。
 
+#### 场景 B 的「未测到变化」标记
+
+当两期专题结果逐像素完全相同时，全部变化指标恒为 0 —— 这是**输入数据没变**，不是片区没变化。此时 `analysis.aef_payload` 带：
+
+```json
+{
+  "scenario": "change",
+  "unmeasured": true,
+  "aggregate": { "all_identical": true, "identical_patch_count": 8, "patch_count": 8 }
+}
+```
+
+前端遇到 `unmeasured: true` 时，建议不要画趋势图或"持平"结论，直接展示 `message` / 报告里的说明；`analysis.limitations[0]` 会是一条 `⚠️` 开头的成因说明。`unmeasured: false`（默认）按正常变化报告渲染。
+
+当前已知：海淀 `施工识别` 在 `2025-12 ～ 2026-05` 区间内各月份返回同一份结果，因此该任务的两期对比会命中这个分支；`建筑物提取`、`水体提取`、`道路提取` 逐月不同，不受影响。
+
 哈尔滨报告响应中的 `analysis.data_source` 为 `harbin_embedding_api`，`analysis.aef_payload` 会包含：
 
 ```json
