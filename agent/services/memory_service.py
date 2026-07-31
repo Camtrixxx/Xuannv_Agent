@@ -145,7 +145,13 @@ class MemoryService:
             self._create_session(conn, session_id)
         return self.get(session_id)
 
-    def snapshot(self, session_id: str) -> dict[str, Any]:
+    # Restoring a session in the UI needs the whole conversation, not the short
+    # window the agent carries as LLM context. Bounded so a very long session
+    # can't blow up the response.
+    _RESTORE_MESSAGE_LIMIT = 200
+    _RESTORE_REPORT_LIMIT = 50
+
+    def snapshot(self, session_id: str, *, full_history: bool = False) -> dict[str, Any]:
         memory = self.get(session_id)
         return {
             "session_id": memory.session_id,
@@ -156,8 +162,13 @@ class MemoryService:
             "turn_count": memory.turn_count,
             "report_context": memory.report_context,
             "pending_custom_model": memory.pending_custom_model,
-            "recent_messages": memory.messages[-6:],
-            "reports": self.recent_reports(session_id, limit=5),
+            "recent_messages": (
+                self.messages(session_id, limit=self._RESTORE_MESSAGE_LIMIT)
+                if full_history else memory.messages[-6:]
+            ),
+            "reports": self.recent_reports(
+                session_id, limit=self._RESTORE_REPORT_LIMIT if full_history else 5
+            ),
             "created_at": memory.created_at,
             "updated_at": memory.updated_at,
         }
@@ -221,6 +232,15 @@ class MemoryService:
                 ),
             )
 
+    def messages(self, session_id: str, limit: int = 200) -> list[dict[str, str]]:
+        """The session's last ``limit`` messages, oldest first.
+
+        Used to restore a full conversation in the UI; the agent's own context
+        uses the much shorter ``_recent_messages`` window.
+        """
+        with self._lock, self._connect() as conn:
+            return self._recent_messages(conn, session_id, limit=limit)
+
     def recent_reports(self, session_id: str, limit: int = 5) -> list[dict[str, Any]]:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
@@ -266,14 +286,16 @@ class MemoryService:
                 )
         return self.get(session_id)
 
-    def _recent_messages(self, conn: sqlite3.Connection, session_id: str) -> list[dict[str, str]]:
+    def _recent_messages(
+        self, conn: sqlite3.Connection, session_id: str, limit: int | None = None
+    ) -> list[dict[str, str]]:
         rows = conn.execute(
             """
             SELECT role, content, created_at FROM messages
             WHERE session_id = ?
             ORDER BY id DESC LIMIT ?
             """,
-            (session_id, self.config.recent_message_limit),
+            (session_id, limit if limit is not None else self.config.recent_message_limit),
         ).fetchall()
         return [
             {"role": row["role"], "content": row["content"], "created_at": row["created_at"]}

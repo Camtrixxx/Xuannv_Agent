@@ -406,7 +406,9 @@ def create_app(agent: ReportAgent | None = None):
         return {
             "status": "ok",
             "session": session,
-            "memory": report_agent.memory_service.snapshot(session_id),
+            # Full history: the frontend rebuilds the whole conversation from
+            # this, not just the agent's short context window.
+            "memory": report_agent.memory_service.snapshot(session_id, full_history=True),
         }
 
     @app.post(
@@ -485,7 +487,11 @@ def make_handler(agent: ReportAgent):
                 if not session:
                     self.send_error(404)
                     return
-                json_response(self, {"status": "ok", "session": session, "memory": agent.memory_service.snapshot(session_id)})
+                json_response(self, {
+                    "status": "ok",
+                    "session": session,
+                    "memory": agent.memory_service.snapshot(session_id, full_history=True),
+                })
                 return
             if parsed.path.startswith("/reports/"):
                 self._serve_report(parsed.path)
