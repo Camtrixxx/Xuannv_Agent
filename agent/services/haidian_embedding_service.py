@@ -346,8 +346,13 @@ class HaidianEmbeddingAnalysisService:
         months = [str(item) for item in patch.get("available_months") or []]
         if not any(item == month or item.startswith(month) for item in months):
             return False
-        tasks = patch.get("available_tasks") or []
-        return not tasks or task_id in tasks
+        # available_tasks under-reports for Haidian (only 62/320 patches list
+        # construction, but the result endpoint serves a valid PNG for the rest
+        # and 404s only for a task that truly doesn't exist). Filtering on it
+        # silently shrank a framed multi-patch selection to a single patch, so
+        # keep every patch and let the fetch decide. Mirrors
+        # PatchSelectionService._is_usable_patch.
+        return True
 
     def _task_result_url(self, patch_id: str, task_id: str, month: str) -> str:
         query = urlencode({"format": "png", "version": "v1", "month": month})
