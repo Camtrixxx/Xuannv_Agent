@@ -168,7 +168,16 @@ class PatchSelectionService:
                 break
             page += 1
 
-        rows.sort(key=lambda item: (item.get("score", 0), item.get("patch_id", "")), reverse=True)
+        # Patches that actually advertise the task rank above ones we keep on the
+        # advisory rule above, so a single-patch pick still lands on real data.
+        rows.sort(
+            key=lambda item: (
+                bool(item.get("task_available", True)),
+                item.get("score", 0),
+                item.get("patch_id", ""),
+            ),
+            reverse=True,
+        )
         return rows if limit <= 0 else rows[:limit]
 
     def _search_yajiang(
@@ -185,6 +194,14 @@ class PatchSelectionService:
             return False
         if time_range and not self._month_available(region_id, patch, time_range):
             return False
+        # Haidian's available_tasks under-reports: only 62/320 patches list
+        # construction, yet the result endpoint serves a valid all-white PNG
+        # ("nothing detected here") for the other 258 and 404s only for a task
+        # that genuinely doesn't exist. Dropping those patches silently shrank a
+        # framed selection — 8 patches down to 1 — so task availability is
+        # advisory here and travels as the ``task_available`` flag instead.
+        if region_id == "haidian":
+            return True
         if not self._task_available(region_id, patch, task_id):
             return False
         return True
