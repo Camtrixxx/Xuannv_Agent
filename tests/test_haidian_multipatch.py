@@ -359,3 +359,22 @@ def test_mosaic_url_changes_when_one_patch_result_changes(tmp_path, monkeypatch)
     assert old_mosaic is not None
     assert new_mosaic is not None
     assert old_mosaic != new_mosaic
+
+
+def test_aoi_selection_keeps_patches_whose_available_tasks_omit_the_task():
+    """The report path had its own copy of the available_tasks gate.
+
+    Fixing only PatchSelectionService left /api/report resolving 8 framed
+    patches back down to 1, so the coverage metric disagreed with the checkup
+    scenario over the same AOI (4.68% vs 0.59%).
+    """
+    from agent.services.haidian_embedding_service import HaidianEmbeddingAnalysisService
+
+    service = HaidianEmbeddingAnalysisService()
+    listed = {"has_embedding": True, "available_months": ["202512"],
+              "available_tasks": ["building_extraction", "construction"]}
+    unlisted = {"has_embedding": True, "available_months": ["202512"],
+                "available_tasks": ["building_extraction"]}
+
+    assert service._is_usable_patch(listed, "construction", "202512") is True
+    assert service._is_usable_patch(unlisted, "construction", "202512") is True
