@@ -5,10 +5,10 @@
 ## 联调入口
 
 ```text
-Agent Base URL: http://112.111.7.74:1112
-接口文档:       http://112.111.7.74:1112/api-docs
-Swagger:        http://112.111.7.74:1112/docs
-健康检查:       http://112.111.7.74:1112/api/health
+Agent Base URL: http://60.31.21.42:22070
+接口文档:       http://60.31.21.42:22070/api-docs
+Swagger:        http://60.31.21.42:22070/docs
+健康检查:       http://60.31.21.42:22070/api/health
 ```
 
 前端只调用 Agent，不需要直接访问 AEF 模型服务，也不需要直接访问海淀/哈尔滨 embedding-api。
@@ -201,7 +201,7 @@ Content-Type: application/json
 URL 都是相对路径。前端拼成绝对地址：
 
 ```js
-const BASE = "http://112.111.7.74:1112";
+const BASE = "http://60.31.21.42:22070";
 const htmlUrl = BASE + payload.report.html_url;
 const mdUrl = BASE + payload.report.markdown_url;
 const mapHtmlUrl = payload.report.map_html_url
@@ -347,7 +347,7 @@ if (payload.status === "needs_annotation") {
 ### 最小叠图代码
 
 ```js
-const BASE = "http://112.111.7.74:1112";
+const BASE = "http://60.31.21.42:22070";
 let overlays = [];
 
 // 每次 /api/report 返回 status=ok 后调用一次
@@ -416,7 +416,7 @@ Content-Type: application/json
 ## 最小联调代码
 
 ```js
-const BASE = "http://112.111.7.74:1112";
+const BASE = "http://60.31.21.42:22070";
 
 async function searchPatches({region, task, timeRange, bbox}) {
   const res = await fetch(`${BASE}/api/patches/search`, {
@@ -536,4 +536,4 @@ async function sendReport({sessionId, region, task, prompt, selectedPatchIds, se
 - `task` 可以为空，但生成报告前用户最终必须提供任务；可以通过标签或自然语言提供。
 - `time_range` 可以不传，Agent 会从自然语言解析，例如 `去年九月份`。
 - 报告、Markdown、图片 URL 都是相对路径，需要拼接 `Agent Base URL`。
-- 前端不要直接调用 `127.0.0.1:7862` 或 `60.31.21.42:22065`，这些由 Agent 代理。
+- 前端不要直接调用 `127.0.0.1:7862` 或 `192.168.108.218:9065`，这些由 Agent 代理。

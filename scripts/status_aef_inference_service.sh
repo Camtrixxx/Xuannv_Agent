@@ -2,6 +2,9 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=scripts/_common.sh
+source "${PROJECT_ROOT}/scripts/_common.sh"
+load_env "${PROJECT_ROOT}"
 PORT="${AEF_PORT:-7862}"
 PID_FILE="${PROJECT_ROOT}/agent/runtime/pids/aef_inference.pid"
 LOG_FILE="${PROJECT_ROOT}/agent/runtime/logs/aef_inference.log"

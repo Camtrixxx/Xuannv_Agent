@@ -23,16 +23,16 @@ Xuannv Agent 是一个**遥感专题报告智能体服务**：接收自然语言
 # 依赖
 pip install -r requirements.txt
 
-# 启动 Agent（端口 7870）
-python -m agent.backend.app --host 0.0.0.0 --port 7870
+# 启动 Agent（端口 9070）
+python -m agent.backend.app --host 0.0.0.0 --port 9070
 # 或用脚本（后台 nohup + 读取 .env）
 bash scripts/start_agent_backend.sh
 
 # 健康检查
-curl --noproxy '*' -sS http://127.0.0.1:7870/api/health
+curl --noproxy '*' -sS http://127.0.0.1:9070/api/health
 
 # 前端 mock 页面
-# 浏览器打开 http://127.0.0.1:7870/ui
+# 浏览器打开 http://127.0.0.1:9070/ui
 
 # 测试（149 passed, 2 skipped —— 2 个 skip 是需 live API 的冒烟）
 python -m pytest tests/ -q
@@ -47,13 +47,13 @@ python -m pytest tests/ -q
 
 ### 服务拓扑
 ```
-前端 → Agent (:7870) → AEF 推理 (:7862, 仅雅江) + 哈尔滨/海淀 embedding API (远端)
+前端 → Agent (:9070) → AEF 推理 (:7862, 仅雅江) + 哈尔滨/海淀 embedding API (本机容器)
               ↓
        agent/reports/*.html, *.md, assets/*.png
 ```
 - **Agent 是唯一入口**，前端只调 Agent。
-- 哈尔滨和海淀**共用同一个远端 embedding API**（`AGENT_EMBEDDING_API_BASE_URL`，
-  默认 `http://60.31.21.42:22065`），只是走不同的 `/regions/{harbin|haidian}/...` 路径。
+- 哈尔滨和海淀**共用同一个 embedding API**（`AGENT_EMBEDDING_API_BASE_URL`，
+  默认 `http://192.168.108.218:9065`），只是走不同的 `/regions/{harbin|haidian}/...` 路径。
 
 ### 请求流（LangGraph 8 节点状态机，核心在 `agent/graph/report_agent.py`）
 ```
@@ -170,18 +170,21 @@ bash scripts/stop_agent_backend.sh && bash scripts/start_agent_backend.sh
 ### 5.2 端口速查（别搞混）
 | 端口 | 是什么 |
 |---|---|
-| `7870` | **Agent 服务**（本项目主服务），监听 0.0.0.0 |
-| `7862` | AEF 推理服务（仅雅江） |
-| 远端 `60.31.21.42:22065` | embedding API（模型/推理，哈尔滨+海淀共用） |
-| 本地 `9061` | 同事起的**本地 embedding API 实例**（同一套接口，但见 5.3） |
-| `7871`(本地) | VS Code SSH **端口转发**的本地端，隧道到远程 7870。不是服务器上的端口 |
+| `9070` | **Agent 服务**（本项目主服务），监听 0.0.0.0；对外为 `60.31.21.42:22070` |
+| `7862` | AEF 推理服务（仅雅江，当前服务器缺模型资源，未启用） |
+| `192.168.108.218:9065` | embedding API（模型/推理，哈尔滨+海淀共用）。跑在**本机** `seims-dev` 容器内，经宿主端口映射 9065->9061 访问；不要用 `127.0.0.1:9065`（不通）|
+| 宿主 `9065` | 上面那个容器的宿主机映射端口。**本机访问不通**（docker 端口转发异常），所以直连容器 IP |
 
-> 本机 IP `10.119.16.35`。VS Code 转发时若本地 7870 被占，会自动挑 7871 做本地端。
+> 本机出口 IP `192.168.108.218`，网关 `192.168.108.254`。
+> 服务器 `9000-9098` 段对应公网 `22000-22098`（+13000 偏移），故 Agent 的 9070 → 公网 22070。
 
-### 5.3 本地 9061 的 infer 跑不通（后端数据问题，非 Agent 问题）
-本地 9061 那个 embedding-api 实例，`infer` 目前失败：模型权重是 v2(128维)、
-本地 patch embedding 是 v1(64维)，张量对不上。**远端 22065 同一条链路能跑通**。
-联调时优先用远端 22065（Agent 默认就是它）。本地要用需后端统一 embedding 版本。
+### 5.3 embedding API 的 infer 曾有版本不一致问题（后端数据问题，非 Agent 问题）
+历史记录：早期有一个 embedding-api 实例 `infer` 失败，因为模型权重是 v2(128维)、
+patch embedding 是 v1(64维)，张量对不上；当时改用另一条链路绕过。
+
+迁移到当前服务器后，Agent 经宿主 LAN 地址 `192.168.108.218:9065` 访问本机容器，哈尔滨与海淀的
+patch 检索和全部专题任务已实测通过。若再遇到 `infer` 维度报错，仍应先怀疑
+后端 embedding 版本与权重不匹配，而不是 Agent 侧。
 
 ### 5.4 海淀自定义模型：数量多但 infer 不稳定，且 8 类非原生地物一个都没训
 海淀有 523 个自定义模型，但几乎全是重复训练「建筑/道路/水体/变化」这些**原生**类；
@@ -236,10 +239,10 @@ AGENT_LIVE_MODEL_ID=model_6360bb31 python -m pytest tests/test_custom_change.py 
 | 变量 | 默认 | 用途 |
 |---|---|---|
 | `DEEPSEEK_API_KEY` | 空 | 未设则回退规则解析 + 模板报告 |
-| `AGENT_EMBEDDING_API_BASE_URL` | `http://60.31.21.42:22065` | 哈尔滨/海淀 embedding API |
+| `AGENT_EMBEDDING_API_BASE_URL` | `http://192.168.108.218:9065` | 哈尔滨/海淀 embedding API |
 | `AGENT_AEF_BASE_URL` | `http://127.0.0.1:7862` | 雅江 AEF 推理 |
 | `AGENT_ANNOTATION_UI_BASE` | 同 embedding-api | 标注页深链基址 |
-| `AGENT_PORT` | `7870` | Agent 端口 |
+| `AGENT_PORT` | `9070` | Agent 端口 |
 | `AGENT_MAX_REPORTS` | `50` | 报告文件保留上限 |
 
 `scripts/start_agent_backend.sh` 启动前会 source 仓库根的 `.env`（gitignored），
@@ -256,7 +259,7 @@ AGENT_LIVE_MODEL_ID=model_6360bb31 python -m pytest tests/test_custom_change.py 
 - **Agent 无鉴权**，CORS 默认全开（`*`），定位是 EIP DNAT 后的内网服务。
 - **测试**：149 passed, 2 skipped。新增功能要配套加测试（`tests/` 下按服务分文件）。
   跑测试用 `python -m pytest tests/ -q`（本机 Python 在
-  `/home/heyuhang/miniconda3/envs/hyh-dl/bin/python`）。
+  `/home/zkcs/anaconda3/envs/xuannv_agent/bin/python`）。
 - **提交规范**：commit message 用英文 `type(scope): summary` 格式，末尾带
   `Co-Authored-By`。文档/计划用中文。**只有用户明确要求才提交/推送**。
 

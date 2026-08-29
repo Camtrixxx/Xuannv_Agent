@@ -6,23 +6,27 @@
 
 ```text
 Frontend
-  -> Agent API :7870
+  -> Agent API :9070
       -> AEF inference service :7862
-      -> Harbin/Haidian embedding-api http://60.31.21.42:22065
+      -> Harbin/Haidian embedding-api http://192.168.108.218:9065
       -> agent/reports/*.html, *.md, assets/*.png
 ```
 
-- 对前端暴露：`http://112.111.7.74:1112`
+- 对前端暴露：`http://60.31.21.42:22070`
 - 内部依赖：
   - 雅江 AEF：`http://127.0.0.1:7862`
-  - 哈尔滨/海淀 embedding-api：`http://60.31.21.42:22065`
+  - 哈尔滨/海淀 embedding-api：`http://192.168.108.218:9065`
 - 默认已开启 CORS：`AGENT_CORS_ORIGINS=*`
 
-当前公网访问通过 EIP DNAT 转发：
+当前公网访问通过 EIP DNAT 转发。服务器 `9000-9098` 段整体映射到公网
+`22000-22098`（+13000 偏移），Agent 占用 9070：
 
 ```text
-112.111.7.74:1112 -> 实例 7870
+60.31.21.42:22070 -> 实例 9070
 ```
+
+> 雅江 AEF 依赖的模型权重与原始 patch 不在当前服务器上（`AEF_CODE_ROOT` 缺失），
+> 该服务暂未启用；哈尔滨与海淀不受影响。
 
 生产或联调环境建议只暴露 Agent 对外端口，不要把模型服务端口直接暴露给前端或公网。
 
@@ -46,7 +50,7 @@ Frontend
 | 地区 | 说明 |
 | --- | --- |
 | `雅江区域` | 本机 AEF 闭环验证区域，依赖 `127.0.0.1:7862`；支持本地 GeoTIFF patch 空间索引 |
-| `哈尔滨新区` | 在线 embedding-api 区域，依赖 `60.31.21.42:22065` |
+| `哈尔滨新区` | 在线 embedding-api 区域，依赖 `192.168.108.218:9065` |
 | `北京市海淀区` | 在线 embedding-api 区域；patch 检索、专题结果 PNG 和 embedding 预览已接入 |
 
 各地区当前可用月份。Agent 在调用模型**之前**会做事前校验：月份不在范围内时返回 `needs_input`（HTTP 200）并友好提示可用范围，**不会抛 400**。
@@ -387,7 +391,7 @@ Agent 会区分“生成/修改报告”“讨论报告”和“普通聊天”�
 最小叠图逻辑（伪代码，每次 `/api/report` 返回后调用一次）：
 
 ```js
-const BASE = "http://112.111.7.74:1112";
+const BASE = "http://60.31.21.42:22070";
 
 function updateMapPanel(payload) {
   const charts = payload.analysis?.charts || [];
@@ -439,7 +443,7 @@ function updateMapPanel(payload) {
 
 ```json
 {
-  "service": "http://60.31.21.42:22065",
+  "service": "http://192.168.108.218:9065",
   "region_id": "harbin",
   "task": "land_use_classification",
   "version": "v2",
@@ -453,7 +457,7 @@ function updateMapPanel(payload) {
 
 ```json
 {
-  "service": "http://60.31.21.42:22065",
+  "service": "http://192.168.108.218:9065",
   "region_id": "haidian",
   "task": "building_extraction",
   "version": "v1",
@@ -506,7 +510,7 @@ function updateMapPanel(payload) {
 前端 URL 拼接规则：
 
 ```text
-AGENT_BASE_URL = http://112.111.7.74:1112
+AGENT_BASE_URL = http://60.31.21.42:22070
 absolute_html_url = AGENT_BASE_URL + response.report.html_url
 absolute_image_url = AGENT_BASE_URL + response.analysis.charts[0].url
 ```
@@ -729,9 +733,31 @@ absolute_image_url = AGENT_BASE_URL + response.analysis.charts[0].url
 ## Curl 示例
 
 ```bash
-BASE=http://112.111.7.74:1112
+BASE=http://60.31.21.42:22070
 
 curl --noproxy '*' "$BASE/api/health"
+
+# 海淀专题报告（当前服务器已实测可用）。patch_id 先用
+# POST /api/patches/search 拿，或由前端地图框选传入。
+curl --noproxy '*' -X POST "$BASE/api/report" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "session_id": "demo-haidian",
+    "prompt": "分析海淀区2026年5月的建筑物提取情况",
+    "selected_patch_ids": ["patch_000092"]
+  }'
+
+# 海淀复合场景需要 aoi，注意结构是 {"type":"bbox","coordinates":[...]}
+curl --noproxy '*' -X POST "$BASE/api/report" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "session_id": "demo-checkup",
+    "prompt": "对海淀这个片区做一次2026年5月的综合体检",
+    "selected_patch_ids": ["patch_000092", "patch_000093"],
+    "aoi": {"type": "bbox", "coordinates": [116.28, 39.95, 116.33, 39.99]}
+  }'
+
+# 下面几个雅江示例依赖 AEF 服务，当前服务器缺模型资源，会返回 needs_input。
 
 curl --noproxy '*' -X POST "$BASE/api/report" \
   -H 'Content-Type: application/json' \

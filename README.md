@@ -38,7 +38,7 @@
 
 ```text
 前端
-  -> Xuannv Agent :7870
+  -> Xuannv Agent :9070
       -> 雅江 AEF 推理服务 :7862
       -> 哈尔滨 / 海淀 embedding-api（共用 base URL，不同 /regions 路径）
       -> agent/reports/*.html, *.md, assets/*.png
@@ -59,20 +59,25 @@ load_memory -> parse_intent -> merge_memory -> route -> run_analysis -> generate
 
 ## 快速启动
 
-推荐使用服务器上已有的 `hyh-dl` 环境：
+使用 conda 环境 `xuannv_agent`（Python 3.11）：
 
 ```bash
-cd /data/heyuhang/Xuannv_Agent
+cd /data/xuanspace/Xuannv_Agent
+conda activate xuannv_agent
 pip install -r requirements.txt
 scripts/start_services.sh    # 先启动 AEF，健康检查通过后再启动 Agent
 ```
 
+> 当前服务器上 `AEF_CODE_ROOT` 缺失（模型权重与雅江原始 patch 不在本机），AEF 起不来。
+> `start_services.sh` 会打印警告并继续启动 Agent —— 哈尔滨与海淀不依赖 AEF，只有雅江任务不可用。
+> 若要让 AEF 启动失败即中断，设 `AEF_REQUIRED=1`。
+
 本机访问：
 
 ```text
-http://127.0.0.1:7870/        # 前端页面
-http://127.0.0.1:7870/ui      # Mock 前端
-http://127.0.0.1:7870/api-docs
+http://127.0.0.1:9070/        # 前端页面
+http://127.0.0.1:9070/ui      # Mock 前端
+http://127.0.0.1:9070/api-docs
 ```
 
 查看状态 / 停止：
@@ -103,6 +108,32 @@ scripts/status_aef_inference_service.sh
 scripts/stop_aef_inference_service.sh
 ```
 
+### 保活（崩溃自动重启 + 开机自启）
+
+服务器多人共用，进程可能被误杀或因偶发异常退出。`watchdog_agent.sh` 每分钟探一次
+`/api/health`，连续 3 次（间隔 3s）失败才判定为故障，然后 `stop` + `start` 重启 —— 先
+stop 是因为进程可能还活着但已卡死（端口被占、不响应），此时单独 start 会认为服务在跑而
+拒绝动作。
+
+```bash
+scripts/install_watchdog_cron.sh   # 写入当前用户 crontab，可重复执行不会叠加
+crontab -l                         # 查看
+tail -f agent/runtime/logs/watchdog.log
+```
+
+装好后有两条任务：每分钟一次的探活重启，以及 `@reboot` 开机自启（延迟 60s 等 docker
+起来）。健康时脚本约 20ms 退出且不写日志；只有真正重启才记录，并附上 Agent 崩溃前的
+最后 20 行日志便于定位。用 `flock` 互斥，重启比 cron 周期长也不会有两个实例抢端口。
+
+最坏情况恢复时间约 1 分钟（cron 最小粒度）。要停止保活：
+
+```bash
+crontab -l | grep -v 'xuannv-agent watchdog' | crontab -
+```
+
+`deploy/xuannv-agent.service` 是等效的 systemd 方案（`Restart=always`，恢复更快、
+约 10s），但安装需要 sudo；cron 方案不需要，因此作为默认。
+
 ## API
 
 核心接口：
@@ -125,9 +156,9 @@ POST /api/session/reset
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `DEEPSEEK_API_KEY` | 空 | 可选。未设置时使用规则解析和模板报告兜底 |
-| `AGENT_PORT` | `7870` | Agent 服务端口 |
+| `AGENT_PORT` | `9070` | Agent 服务端口 |
 | `AGENT_AEF_BASE_URL` | `http://127.0.0.1:7862` | 雅江 AEF 推理服务地址 |
-| `AGENT_EMBEDDING_API_BASE_URL` | `http://60.31.21.42:22065` | 哈尔滨 / 海淀 embedding-api 地址 |
+| `AGENT_EMBEDDING_API_BASE_URL` | `http://192.168.108.218:9065` | 哈尔滨 / 海淀 embedding-api 地址 |
 | `AGENT_MAX_SELECTED_PATCHES` | `8` | 海淀普通报告单次处理的最大 patch 数 |
 | `AGENT_MAX_REPORTS` | `50` | 报告文件保留上限，0 为不限 |
 | `AGENT_CORS_ORIGINS` | `*` | CORS 来源 |
@@ -185,7 +216,7 @@ models/
 python -m pytest tests/ -q
 python -m py_compile $(find agent aef_inference -name '*.py' -print)
 scripts/status_services.sh
-curl --noproxy '*' -sS http://127.0.0.1:7870/api/health
+curl --noproxy '*' -sS http://127.0.0.1:9070/api/health
 curl --noproxy '*' -sS http://127.0.0.1:7862/api/health
 ```
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PYTHON="${PYTHON:-/home/heyuhang/miniconda3/envs/hyh-dl/bin/python}"
+PYTHON="${PYTHON:-/home/zkcs/anaconda3/envs/xuannv_agent/bin/python}"
 HOST="${AEF_HOST:-127.0.0.1}"
 PORT="${AEF_PORT:-7862}"
 
@@ -43,6 +43,27 @@ nohup setsid "${PYTHON}" -m aef_inference.server \
   --device "${AEF_DEVICE}" \
   >"${LOG_FILE}" 2>&1 </dev/null &
 
-echo $! > "${PID_FILE}"
-echo "PID: $(cat "${PID_FILE}")"
+new_pid=$!
+echo "${new_pid}" > "${PID_FILE}"
+echo "PID: ${new_pid}"
 echo "Log: ${LOG_FILE}"
+
+# Loading model weights onto the GPU takes a while, so allow a longer window
+# than the Agent needs; still fail loudly rather than reporting a dead PID.
+for _ in $(seq 1 "${START_TIMEOUT:-180}"); do
+  if curl --noproxy '*' -fsS -m 2 "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1; then
+    echo "AEF inference service is healthy on ${PORT}."
+    exit 0
+  fi
+  if ! kill -0 "${new_pid}" 2>/dev/null; then
+    echo "ERROR: AEF inference service exited during startup. Last log lines:" >&2
+    tail -n 20 "${LOG_FILE}" >&2
+    rm -f "${PID_FILE}"
+    exit 1
+  fi
+  sleep 1
+done
+
+echo "ERROR: AEF inference service did not become healthy in ${START_TIMEOUT:-180}s. Last log lines:" >&2
+tail -n 20 "${LOG_FILE}" >&2
+exit 1

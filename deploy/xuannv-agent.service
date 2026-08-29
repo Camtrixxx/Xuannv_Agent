@@ -1,0 +1,31 @@
+[Unit]
+Description=Xuannv Agent (remote-sensing thematic report agent on :9070)
+Documentation=file:/data/xuanspace/Xuannv_Agent/README.md
+# The Haidian/Harbin embedding API is published by a docker container on this
+# same host, so docker must be up before the Agent starts serving.
+After=network-online.target docker.service
+Wants=network-online.target
+# Don't give up on a service that crash-loops for a while (e.g. docker still
+# coming back up); keep retrying indefinitely.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=zkcs
+Group=zkcs
+WorkingDirectory=/data/xuanspace/Xuannv_Agent
+# Secrets and local overrides (AGENT_PORT, DEEPSEEK_API_KEY, embedding API URL)
+# live in the gitignored .env. Missing file is tolerated (leading '-').
+EnvironmentFile=-/data/xuanspace/Xuannv_Agent/.env
+Environment=PYTHONPATH=/data/xuanspace/Xuannv_Agent
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/zkcs/anaconda3/envs/xuannv_agent/bin/python -m uvicorn agent.backend.app:app --host 0.0.0.0 --port 9070
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+LimitNOFILE=65535
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -16,9 +16,9 @@ pip install -r requirements.txt
 
 # --- Agent service ---
 # Start the server
-python -m agent.backend.app --host 0.0.0.0 --port 7870
+python -m agent.backend.app --host 0.0.0.0 --port 9070
 # or via uvicorn directly
-uvicorn agent.backend.app:app --host 0.0.0.0 --port 7870
+uvicorn agent.backend.app:app --host 0.0.0.0 --port 9070
 # Legacy http.server fallback (no FastAPI)
 python -m agent.backend.app --legacy-http
 
@@ -33,7 +33,8 @@ python -m aef_inference.server \
   --cache-dir /data/heyuhang/yajiang-aef/outputs/aef_inference_service_v1_2_continue_200
 
 # --- Script management ---
-scripts/start_services.sh              # start AEF first, wait for healthy, then start Agent
+scripts/start_services.sh              # start AEF first, then Agent (AEF failure is non-fatal
+                                       #   unless AEF_REQUIRED=1)
 scripts/status_services.sh             # check both services
 scripts/stop_services.sh               # stop both services
 scripts/start_agent_backend.sh         # Agent only (daemonize via nohup)
@@ -44,6 +45,25 @@ scripts/status_aef_inference_service.sh
 scripts/stop_aef_inference_service.sh
 ```
 
+`scripts/watchdog_agent.sh` + `scripts/install_watchdog_cron.sh` provide crash
+recovery without root: cron probes `/api/health` every minute, declares failure
+only after 3 consecutive misses, then runs `stop` + `start` (stop first — the
+process may be alive but wedged, holding the port while not answering, which a
+bare `start` refuses to act on). Worst-case recovery is ~1 minute. `@reboot`
+covers boot. Two implementation details matter: it holds a `flock` so a restart
+slower than cron's tick cannot spawn a competing instance, and it closes that
+lock fd (`9>&-`) when exec'ing the start script — otherwise the long-lived Agent
+inherits the fd, holds the lock forever, and silently disables every later
+watchdog run. `deploy/xuannv-agent.service` is an equivalent systemd unit
+(`Restart=always`, ~10s recovery) kept for when someone with sudo installs it.
+
+`scripts/_common.sh` holds the shared shell helpers: `load_env` (source the
+gitignored `.env`), `stop_pids` (SIGTERM → poll for actual exit → SIGKILL
+fallback), and `service_pids`. The start scripts poll `/api/health` and exit
+non-zero with the log tail if the process dies or never becomes healthy, and the
+stop scripts block until the process is really gone before removing the PID file
+— so a `stop` immediately followed by a `start` is safe.
+
 A small pytest suite under `tests/` covers the deterministic, network-free
 helpers (bbox scoring, LLM JSON extraction, month inference, rule-based intent
 parsing, patch-id mapping). Run it plus Python compilation and service smoke
@@ -53,7 +73,7 @@ tests:
 python -m pytest tests/ -q
 python -m py_compile $(find agent aef_inference -name '*.py' -print)
 scripts/status_services.sh
-curl --noproxy '*' -sS http://127.0.0.1:7870/api/health
+curl --noproxy '*' -sS http://127.0.0.1:9070/api/health
 curl --noproxy '*' -sS http://127.0.0.1:7862/api/health
 ```
 
@@ -79,12 +99,16 @@ load_memory → parse_intent → merge_memory → route → ...
 ### Service Topology
 
 ```
-Frontend → Agent (:7870) → AEF Inference (:7862) + Harbin/Haidian Embedding API (remote)
+Frontend → Agent (:9070) → AEF Inference (:7862) + Harbin/Haidian Embedding API (local container)
                 ↓
          agent/reports/*.html, *.md, assets/*.png
 ```
 
-Harbin and Haidian share the same remote embedding API base URL (`AGENT_EMBEDDING_API_BASE_URL`) but hit different `/regions/{harbin|haidian}/...` paths.
+Harbin and Haidian share the same embedding API base URL (`AGENT_EMBEDDING_API_BASE_URL`) but hit different `/regions/{harbin|haidian}/...` paths.
+
+On the current server that API runs **on this same host**, inside the `seims-dev` container, published as host port `9065->9061`. Reach it via the host's LAN IP `http://192.168.108.218:9065` — **not** `127.0.0.1:9065`, which times out (docker's published port is not reachable over loopback here). The container IP `http://172.20.0.10:9061` also works but is not durable: it can change when docker restarts, so config should prefer the LAN IP. The sibling `xuanspace-backend.service` uses the same LAN address. The old public entry `60.31.21.42:22065` is the EIP DNAT path used by off-host clients; from this machine it is silently dropped.
+
+Host ports `9000-9098` are DNAT-mapped to public `22000-22098` (+13000). The Agent listens on **9070**, i.e. public `60.31.21.42:22070`.
 
 The Agent is the unified entry point. Frontend only calls Agent. The AEF inference service can run co-located on the same server.
 
@@ -144,16 +168,16 @@ Side-effect-free, independently unit-tested analysis atoms the Haidian scenario 
 
 ### Configuration (`agent/config.py`)
 
-All config is env-driven via dataclasses with `field(default_factory=...)`. The Python code itself does no `.env` loading, but `scripts/start_agent_backend.sh` sources a gitignored `.env` at the repo root (if present) before launching, so secrets like `DEEPSEEK_API_KEY` persist across restarts without entering git. Set variables in the environment directly when running uvicorn manually. Key variables:
+All config is env-driven via dataclasses with `field(default_factory=...)`. The Python code itself does no `.env` loading; the shell scripts source a gitignored `.env` at the repo root via `load_env` in `scripts/_common.sh`, so secrets like `DEEPSEEK_API_KEY` and the deployment's `AGENT_PORT` persist across restarts without entering git. `.env` is sourced **before** the scripts derive `PORT`, so it can set the port; values already exported in the environment still win. Set variables in the environment directly when running uvicorn manually. Key variables:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `DEEPSEEK_API_KEY` | (empty) | When unset, falls back to rule parsing and template reports |
 | `AGENT_AEF_BASE_URL` | `http://127.0.0.1:7862` | Yajiang AEF inference service |
-| `AGENT_EMBEDDING_API_BASE_URL` | `http://60.31.21.42:22065` | Harbin/Haidian embedding API (shared base URL) |
+| `AGENT_EMBEDDING_API_BASE_URL` | `http://192.168.108.218:9065` | Harbin/Haidian embedding API (shared base URL) |
 | `AGENT_YAJIANG_RAW_ROOT` | `downloads/xuannv_embeddings/extracted/raw/yajiang` | Yajiang raw GeoTIFF patch root for the local spatial index |
 | `AGENT_YAJIANG_PATCH_INDEX` | `agent/runtime/yajiang_patch_index.json` | Cached Yajiang patch spatial index |
-| `AGENT_PORT` | `7870` | Agent server port |
+| `AGENT_PORT` | `9070` | Agent server port |
 | `AGENT_MAX_REPORTS` | `50` | Max report files to retain; 0 = unlimited |
 | `AEF_CODE_ROOT` | `/data/heyuhang/yajiang-aef` | External training/model code root (added to PYTHONPATH) |
 | `AEF_PORT` | `7862` | AEF inference service port |
